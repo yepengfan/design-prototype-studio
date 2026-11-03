@@ -16,6 +16,7 @@ import { DependencyCache } from "./dependencies.js";
 import { stopChild, runCommand } from "./process.js";
 import { componentReference } from "./component-reference.js";
 import { providerSetup, projectSpecifier } from "./providers.js";
+import { validateCapabilities } from "./source.js";
 import { writeFiles } from "./files.js";
 
 export type Preview = {
@@ -103,6 +104,7 @@ export class Previews {
     snapshot: Snapshot,
     build = false,
   ): Promise<void> {
+    validateCapabilities(snapshot.files, snapshot.manifest);
     const root = await this.materialize(snapshot);
     const result = await this.command(
       path.join(root, "node_modules", ".bin", "tsc"),
@@ -116,6 +118,9 @@ export class Previews {
         result.stdout.slice(0, 12000),
       );
     if (build) {
+      const lint = await this.command("npm", ["run", "lint"], root);
+      if (lint.code)
+        throw new StudioError("Project lint failed. The project is not deliverable.", 422, lint.stdout.slice(0, 12000));
       const built = await this.command("npm", ["run", "build"], root);
       if (built.code)
         throw new StudioError(

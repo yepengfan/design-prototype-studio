@@ -400,25 +400,6 @@ export async function inspectLibrary(
   }
   return { components, templates, warnings };
 }
-export function searchComponents(components: Component[], query: string) {
-  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-  return components
-    .map((c) => ({
-      c,
-      score: words.reduce(
-        (s, w) =>
-          s +
-          (c.name.toLowerCase().includes(w) ? 4 : 0) +
-          (c.description.toLowerCase().includes(w) ? 2 : 0) +
-          (c.package.toLowerCase().includes(w) ? 1 : 0),
-        0,
-      ),
-    }))
-    .filter((x) => !words.length || x.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .map((x) => x.c);
-}
-
 export async function readLibraryTemplates(
   installedRoot: string,
   name: string,

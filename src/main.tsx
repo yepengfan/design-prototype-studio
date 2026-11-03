@@ -60,8 +60,11 @@ type Modal =
   | "templates"
   | null;
 function Studio() {
-  const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
   const [id, setId] = useState(localStorage.getItem("studio-project") ?? "");
+  return <ProjectStudio key={id} id={id} setId={setId} />;
+}
+function ProjectStudio({ id, setId }: { id: string; setId: (id: string) => void }) {
+  const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
   const [data, setData] = useState<Data>();
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -189,7 +192,14 @@ function Studio() {
       void api(`/previews/${preview.id}`, undefined, "DELETE").catch(() => {});
     setPreview(undefined);
     setSelection("");
+    return () => { previewRequest.current++; };
   }, [id]); // Project switch is the reload boundary.
+  useEffect(() => () => {
+    if (preview) void api(`/previews/${preview.id}`, undefined, "DELETE").catch(() => {});
+  }, [preview]);
+  useEffect(() => () => {
+    if (candidatePreview) void api(`/previews/${candidatePreview.id}`, undefined, "DELETE").catch(() => {});
+  }, [candidatePreview]);
   useEffect(() => {
     if (!id) return;
     const timer = setInterval(() => {
@@ -1135,7 +1145,7 @@ function Studio() {
                         spec={spec}
                         value={node.props[key] ?? spec.default}
                         controlled={
-                          node.props[key] === undefined && key in node.props
+                          node.controlled.includes(key)
                         }
                         save={(value) =>
                           act("Updating property", () =>
@@ -1684,12 +1694,13 @@ function Studio() {
                         undefined,
                         "DELETE",
                       );
-                    setCandidatePreview(
-                      await api(
-                        `/projects/${id}/runs/${reviewRun.id}/preview`,
-                        { scenario },
-                      ),
-                    );
+                    const request = previewRequest.current;
+                    const next = await api(`/projects/${id}/runs/${reviewRun.id}/preview`, { scenario });
+                    if (request !== previewRequest.current) {
+                      await api(`/previews/${next.id}`, undefined, "DELETE");
+                      return;
+                    }
+                    setCandidatePreview(next);
                   })
                 }
               >
@@ -2100,10 +2111,9 @@ function Library({
   const [impact, setImpact] = useState<any>();
   useEffect(
     () => () => {
-      if (impact?.preview?.id)
-        void api(`/previews/${impact.preview.id}`, undefined, "DELETE").catch(
-          () => {},
-        );
+      for (const preview of [impact?.preview, ...(impact?.pages ?? [])])
+        if (preview?.id)
+          void api(`/previews/${preview.id}`, undefined, "DELETE").catch(() => {});
     },
     [impact],
   );
@@ -2188,6 +2198,12 @@ function Library({
               sandbox="allow-scripts allow-same-origin allow-forms"
             />
           )}
+          {impact.pages?.map((page: { id: string; title: string; url: string }) => (
+            <iframe key={page.id} title={`Upgrade impact: ${page.title}`} className="candidate-preview" src={page.url} sandbox="allow-scripts allow-same-origin allow-forms" />
+          ))}
+          {impact.quality?.results.map((result: { scenario: string; name: string; failures: string[] }) => (
+            <p key={result.scenario}>{result.name}: {result.failures.join("; ") || "Scenario checks passed"}</p>
+          ))}
           <strong>
             {impact.previous
               ? `Upgrade ${impact.previous} → ${impact.next}`
@@ -2200,10 +2216,12 @@ function Library({
           <button
             type="button"
             className="primary"
+            disabled={impact.quality && !impact.quality.ready}
             onClick={() =>
               void run("Importing exact library release", async () => {
                 await api(`/projects/${project}/library`, {
                   ...body,
+                  confirmation: impact.confirmation,
                   apply: true,
                 });
                 finish();

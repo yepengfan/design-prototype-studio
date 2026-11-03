@@ -64,7 +64,7 @@ export async function checkQuality(
       if (message.type() === "error") smokeErrors.push(message.text());
     });
     try {
-      await smoke.goto(react.url);
+      await smoke.goto(new URL("/", react.url).href);
       await smoke.locator("#root > *").first().waitFor();
       if (smokeErrors.length) throw new Error(smokeErrors.join("; "));
     } finally {

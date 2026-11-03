@@ -6,9 +6,10 @@ import {
   type JsxSelfClosingElement,
   type SourceFile,
 } from "ts-morph";
+import { providerSetup } from "./providers.js";
 import { componentReference } from "./component-reference.js";
 import { digest } from "./files.js";
-import { StudioError, type Component, type Property } from "./contracts.js";
+import { StudioError, type Component, type Property, type Files, type Manifest } from "./contracts.js";
 
 type Element = JsxElement | JsxSelfClosingElement;
 export type Anchor = {
@@ -20,6 +21,7 @@ export type Anchor = {
   parent?: string;
   slot?: string;
   props: Record<string, unknown>;
+  controlled: string[];
   text?: string;
   dynamic: boolean;
   component?: Component;
@@ -157,6 +159,18 @@ export function anchors(
           ? value(init.getText(), true)
           : true;
       }
+    const controlled = new Set<string>();
+    for (const attribute of op.getAttributes()) {
+      if (Node.isJsxSpreadAttribute(attribute)) {
+        for (const name of [...Object.keys(props), ...Object.keys(imports.get(op.getTagNameNode().getText())?.props ?? {}), ...(imports.get(op.getTagNameNode().getText())?.slots ?? []), "style"])
+          controlled.add(name);
+      } else if (Node.isJsxAttribute(attribute)) {
+        const name = attribute.getNameNode().getText();
+        if (props[name] === undefined) controlled.add(name);
+        else controlled.delete(name);
+      }
+    }
+    for (const name of controlled) props[name] = undefined;
     const ancestor = n.getAncestors().find(jsx);
     const tagNode = op.getTagNameNode();
     const tag = tagNode.getText();
@@ -176,6 +190,7 @@ export function anchors(
       parent: ancestor ? ids.get(ancestor) : undefined,
       slot: owningSlot(n, ancestor),
       props,
+      controlled: [...controlled],
       text:
         Node.isJsxElement(n) &&
         n
@@ -202,7 +217,8 @@ export function anchors(
       dynamic: n
         .getAncestors()
         .some(
-          (a) => Node.isCallExpression(a) || Node.isConditionalExpression(a),
+          (a) => Node.isCallExpression(a) || Node.isConditionalExpression(a) ||
+            (Node.isBinaryExpression(a) && [SyntaxKind.AmpersandAmpersandToken, SyntaxKind.BarBarToken, SyntaxKind.QuestionQuestionToken].includes(a.getOperatorToken().getKind())),
         ),
       component: genuine ? component : undefined,
     };
@@ -295,9 +311,9 @@ export function editSource(
         "This value does not match the documented component property.",
       );
     const existing = op.getAttribute(edit.property!);
-    if (!existing && op.getAttributes().some(Node.isJsxSpreadAttribute))
+    if (anchor.controlled.includes(edit.property!))
       throw new StudioError(
-        "This setting may be supplied by page behavior. Use a prompt to preserve it.",
+        "This setting is controlled by page behavior or a spread. Use a prompt to preserve it.",
       );
     if (
       existing &&
@@ -420,6 +436,8 @@ export function editSource(
       )
     )
       throw new StudioError("Choose flow, stack or grid for the container.");
+    if (anchor.controlled.includes("style"))
+      throw new StudioError("This style is behavior-owned. Use a prompt.");
     const existing = op.getAttribute("style");
     let current: Record<string, unknown> = {};
     if (existing && Node.isJsxAttribute(existing)) {
@@ -534,9 +552,15 @@ export function editSource(
       .filter(([p]) => c.props[p])
       .map(([p, v]) => `${p}={${JSON.stringify(v)}}`)
       .join(" ");
-    const text = c.children
+    let text = c.children
       ? `<${local} ${attributes}>{${JSON.stringify(example.children ?? c.name)}}</${local}>`
       : `<${local} ${attributes} />`;
+    if (c.provider) {
+      const setup = providerSetup(c.provider, "./", `Provider${digest([c.provider, source]).slice(0, 8)}`);
+      const providerImport = parse(setup.imports).getImportDeclarations()[0];
+      file.addImportDeclaration(providerImport.getStructure());
+      text = setup.wrap(text);
+    }
     if (edit.slot) {
       const patch = slotPatch(node, edit.slot, text, edit.index);
       file.replaceText([patch.start, patch.end], patch.text);
@@ -568,6 +592,24 @@ export function editSource(
       node.getDescendants().includes(parent)
     )
       throw new StudioError("Choose a different supported parent container.");
+    const protectedTags = new Set(["form"]);
+    for (const component of components) {
+      if (!component.provider) continue;
+      const [module, exported = "default"] = component.provider.split("#");
+      for (const declaration of file.getImportDeclarations().filter((item) => item.getModuleSpecifierValue() === module)) {
+        const named = declaration.getNamedImports().find((item) => item.getName() === exported);
+        const local = named?.getAliasNode()?.getText() ?? named?.getName() ?? (exported === "default" ? declaration.getDefaultImport()?.getText() : undefined);
+        if (local) protectedTags.add(local);
+        const namespace = declaration.getNamespaceImport();
+        if (namespace) protectedTags.add(namespace.getText() + "." + exported);
+      }
+    }
+    const protectedNode = (element: Node) => jsx(element) && protectedTags.has(opening(element).getTagNameNode().getText());
+    const owners = (element: Element) => element.getAncestors().filter(protectedNode);
+    const beforeOwners = owners(node);
+    const afterOwners = [...(protectedNode(parent) ? [parent] : []), ...owners(parent)];
+    if (target?.dynamic || beforeOwners.length !== afterOwners.length || beforeOwners.some((owner, index) => owner !== afterOwners[index]))
+      throw new StudioError("This move changes conditional, provider or form ownership. Use a prompt to review the matching requirements.", 422);
     if (edit.slot) {
       if (!target?.component?.slots.includes(edit.slot))
         throw new StudioError("This parent does not document that slot.");
@@ -623,6 +665,9 @@ function slotPatch(
 ) {
   const op = opening(parent);
   const existing = op.getAttribute(slot);
+  const attributes = op.getAttributes();
+  if (attributes.some((attribute, index) => Node.isJsxSpreadAttribute(attribute) && (!existing || index > attributes.indexOf(existing))))
+    throw new StudioError("This slot may be supplied by page behavior. Use a prompt to preserve it.");
   if (!existing)
     return {
       start: op.getTagNameNode().getEnd(),
@@ -778,4 +823,82 @@ function removalPatch(node: Element) {
     end: node.getEnd(),
     text: Node.isJsxElement(parent) || Node.isJsxFragment(parent) ? "" : "null",
   };
+}
+
+export function validateCapabilities(files: Files, manifest: Manifest) {
+  const project = new Project({ useInMemoryFileSystem: true, compilerOptions: { jsx: 4, moduleResolution: 100 } });
+  for (const [name, source] of Object.entries(files))
+    if (/\.[cm]?[jt]sx?$/.test(name)) project.createSourceFile("/" + name, source);
+  type Reference = { module: string; exported: string };
+  const reference = (node: Node, seen = new Set<Node>()): Reference | undefined => {
+    if (seen.has(node)) return undefined;
+    seen.add(node);
+    if (Node.isParenthesizedExpression(node) || Node.isAsExpression(node) || Node.isNonNullExpression(node))
+      return reference(node.getExpression(), seen);
+    if (Node.isPropertyAccessExpression(node)) {
+      const base = reference(node.getExpression(), seen);
+      return base && { ...base, exported: base.exported ? base.exported + "." + node.getName() : node.getName() };
+    }
+    if (Node.isExportSpecifier(node)) {
+      const declaration = node.getFirstAncestorByKindOrThrow(SyntaxKind.ExportDeclaration);
+      const module = declaration.getModuleSpecifierValue();
+      if (module && !module.startsWith(".")) return { module, exported: node.getName() };
+      for (const value of node.getLocalTargetSymbol()?.getDeclarations() ?? []) {
+        const found = reference(value, seen);
+        if (found) return found;
+      }
+      return undefined;
+    }
+    if (Node.isVariableDeclaration(node)) {
+      const initializer = node.getInitializer();
+      return initializer && reference(initializer, seen);
+    }
+    if (Node.isImportSpecifier(node) || Node.isImportClause(node) || Node.isNamespaceImport(node)) {
+      const declaration = node.getFirstAncestorByKindOrThrow(SyntaxKind.ImportDeclaration);
+      const module = declaration.getModuleSpecifierValue();
+      const exported = Node.isImportSpecifier(node) ? node.getName() : Node.isNamespaceImport(node) ? "" : "default";
+      if (!module.startsWith(".")) return { module, exported };
+      const target = declaration.getModuleSpecifierSourceFile();
+      for (const declaration of target?.getExportDeclarations() ?? []) {
+        const named = declaration.getNamedExports().find((item) => (item.getAliasNode()?.getText() ?? item.getName()) === exported);
+        if (named) {
+          const found = reference(named, seen);
+          if (found) return found;
+        }
+      }
+      const declarations = target?.getExportedDeclarations().get(exported) ?? [];
+      for (const value of declarations) {
+        const found = reference(value, seen);
+        if (found) return found;
+      }
+      return undefined;
+    }
+    if (Node.isIdentifier(node))
+      for (const declaration of node.getSymbol()?.getDeclarations() ?? []) {
+        const found = reference(declaration, seen);
+        if (found) return found;
+      }
+    return undefined;
+  };
+  const allowed = new Set(manifest.libraries.flatMap((library) => library.components.flatMap((component) => [
+    component.package + "#" + component.export,
+    ...(component.provider ? [component.provider.includes("#") ? component.provider : component.provider + "#default"] : []),
+  ])));
+  if (manifest.provider) allowed.add(manifest.provider.includes("#") ? manifest.provider : manifest.provider + "#default");
+  const check = (node: Node) => {
+    const origin = reference(node);
+    if (!origin || ["react", "react-dom"].some((module) => origin.module === module || origin.module.startsWith(module + "/"))) return;
+    if (!allowed.has(origin.module + "#" + origin.exported))
+      throw new StudioError(`Library capability ${origin.module}#${origin.exported} is not admitted. Ask the library maintainer for documented setup and examples in an updated release.`, 422);
+  };
+  for (const file of project.getSourceFiles()) {
+    if (!file.getFilePath().startsWith("/src/")) continue;
+    for (const node of file.getDescendants()) {
+      if (Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) check(node.getTagNameNode());
+      if (Node.isCallExpression(node)) {
+        const callee = reference(node.getExpression());
+        if (callee?.module === "react" && callee.exported === "createElement" && node.getArguments()[0]) check(node.getArguments()[0]);
+      }
+    }
+  }
 }

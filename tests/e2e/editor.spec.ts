@@ -77,6 +77,11 @@ test("designer chooses scope, admits a real private library, composes and edits 
   await expect(
     page.getByRole("heading", { name: "Card", exact: true }),
   ).toBeVisible({ timeout: 150_000 });
+  await page.getByPlaceholder("Search name or purpose…").fill("related content");
+  await expect(page.getByRole("heading", { name: "Card", exact: true })).toBeVisible();
+  await page.getByPlaceholder("Search name or purpose…").fill("unavailable capability");
+  await expect(page.getByRole("heading", { name: "Card", exact: true })).toHaveCount(0);
+  await page.getByPlaceholder("Search name or purpose…").fill("");
   await page.getByRole("button", { name: "Outline", exact: true }).click();
   await page.locator(".outline button").filter({ hasText: "main" }).click();
   await page.getByRole("button", { name: "Components", exact: true }).click();
@@ -208,4 +213,17 @@ test("designer composes genuine compound components in named slots and edits str
     fullPage: true,
     animations: "disabled",
   });
+});
+
+test("returning to Your projects clears the editor before another project opens", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("Project name").fill("First switch project");
+  await page.getByRole("button", { name: "Create blank project" }).click();
+  await expect(page.getByLabel("Current project")).not.toHaveValue("");
+  await page.getByLabel("Current project").selectOption("");
+  await expect(page.getByLabel("Project name")).toBeVisible();
+  await page.getByLabel("Project name").fill("Second switch project");
+  await page.getByRole("button", { name: "Create blank project" }).click();
+  await expect(page.getByLabel("Current project").locator("option:checked")).toHaveText("Second switch project");
+  await expect(page.getByLabel("Scenario preview")).toHaveValue("");
 });

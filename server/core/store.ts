@@ -35,6 +35,12 @@ export class ProjectStore {
     const results = [];
     for (const id of await fs.readdir(this.root)) {
       if (!/^[a-f0-9-]{36}$/.test(id)) continue;
+      try {
+        await fs.access(path.join(this.dir(id), "state.json"));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
       const { snapshot } = await this.get(id);
       results.push({ id, name: snapshot.manifest.name, updated: snapshot.at });
     }

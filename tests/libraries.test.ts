@@ -6,7 +6,6 @@ import { registryFixture } from "./registry";
 import {
   installProject,
   inspectLibrary,
-  searchComponents,
 } from "../server/core/libraries";
 import { npmFailure } from "../server/core/process";
 it("authenticates to a real local registry, admits two packages, preserves identities and pins releases without exporting credentials", async () => {
@@ -48,12 +47,8 @@ it("authenticates to a real local registry, admits two packages, preserves ident
       "@studio-test/layout",
       "1.0.0",
     );
-    const found = searchComponents(
-      [...controls.components, ...layouts.components],
-      "related content",
-    );
-    expect(found[0].name).toBe("Card");
-    expect(found[0].package).toBe("@studio-test/layout");
+    expect(layouts.components[0].name).toBe("Card");
+    expect(layouts.components[0].package).toBe("@studio-test/layout");
     expect(controls.components[0].examples).toHaveLength(2);
     expect(
       JSON.parse(lock).packages["node_modules/@studio-test/controls"].version,

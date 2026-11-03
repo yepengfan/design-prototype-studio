@@ -3,6 +3,9 @@ import { readFileSync } from "node:fs";
 import type { Files, Manifest } from "./contracts.js";
 
 export const runtimeVersions = {
+  eslint: "10.14.0",
+  "@eslint/js": "10.0.1",
+  "typescript-eslint": "8.72.1",
   react: "19.3.1",
   "react-dom": "19.3.1",
   vite: "8.3.5",
@@ -38,7 +41,13 @@ export function blankProject(name: string): {
     styles: [],
   };
   const files: Files = {
-    "src/vite-env.d.ts": '/// <reference types="vite/client" />\n',
+    "eslint.config.js": `import js from "@eslint/js";
+import ts from "typescript-eslint";
+export default ts.config(js.configs.recommended, ...ts.configs.recommended, {
+  files: ["**/*.{ts,tsx}"],
+  rules: { "@typescript-eslint/no-explicit-any": "off", "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }] }
+});
+`,
     "tests/scenarios.spec.ts": readFileSync(
       new URL("../templates/scenarios.spec.ts", import.meta.url),
       "utf8",
@@ -62,6 +71,7 @@ export default defineConfig({ testDir: "./tests", use: { baseURL: url, viewport:
         scripts: {
           dev: "vite --host 127.0.0.1",
           build: "tsc --noEmit && vite build",
+          lint: "eslint src --max-warnings 0",
           storybook: "storybook dev -p 6006 --host 127.0.0.1 --no-open",
           "build-storybook": "storybook build",
           "test:scenarios": "playwright test",
@@ -85,6 +95,7 @@ export default defineConfig({ testDir: "./tests", use: { baseURL: url, viewport:
       {
         compilerOptions: {
           target: "ES2022",
+          types: ["vite/client"],
           lib: ["ES2022", "DOM", "DOM.Iterable"],
           module: "ESNext",
           moduleResolution: "Bundler",
@@ -109,7 +120,7 @@ export default defineConfig({ testDir: "./tests", use: { baseURL: url, viewport:
       'export default { parameters: { layout: "fullscreen" } };\n',
     ".storybook/preview.tsx": "// Studio preview\nexport default {};\n",
     "README.md":
-      "# React prototype\n\nUse Node 22.18 or newer. Run `npm ci --ignore-scripts`, `npm run dev`, `npm run storybook`, and `npm run build`. Private dependencies require your own npm registry login.\n\nCanonical pages, controllers, styles, fixtures and requirements are included. Connect real data by implementing the typed query/operation adapter interfaces in `src/data`; keep page validation and layout in place. Every Gherkin example needs a scenario story and executable step bindings in `studio.project.json`. Studio checks are necessary; a designer must also accept the final visual experience.\n",
+      "# React prototype\n\nUse Node 22.18 or newer. Run `npm ci --ignore-scripts`, `npm run dev`, `npm run storybook`, `npm run build`, and `npm run lint`. Private dependencies require your own npm registry login.\n\nCanonical pages, controllers, styles, fixtures and requirements are included. Connect real data by implementing the typed query/operation adapter interfaces in `src/data`; keep page validation and layout in place. Every Gherkin example needs a scenario story and executable step bindings in `studio.project.json`. Studio checks are necessary; a designer must also accept the final visual experience.\n",
   };
   return { manifest, files: synchronizeRuntime(files, manifest) };
 }
@@ -149,22 +160,7 @@ export function synchronizeRuntime(input: Files, manifest: Manifest): Files {
     const provider = providerSetup(manifest.provider, "../");
     if (page)
       files["src/main.tsx"] =
-        `// Studio launcher\nimport React from 'react';\nimport { createRoot } from 'react-dom/client';\nimport { ${page.export} as Page } from './${page.file.replace(/^src\//, "").replace(/\.tsx?$/, "")}';\n${manifest.styles.map((s) => `import ${JSON.stringify(projectSpecifier(s, "../"))};`).join("\n")}\n${provider.imports}createRoot(document.getElementById('root')!).render(${provider.wrap("<Page />")});\n`;
+        `// Studio launcher\nimport { createRoot } from 'react-dom/client';\nimport { ${page.export} as Page } from './${page.file.replace(/^src\//, "").replace(/\.tsx?$/, "")}';\n${manifest.styles.map((s) => `import ${JSON.stringify(projectSpecifier(s, "../"))};`).join("\n")}\n${provider.imports}createRoot(document.getElementById('root')!).render(${provider.wrap("<Page />")});\n`;
   }
   return files;
-}
-export function nativeStories(files: Files, manifest: Manifest) {
-  const next = { ...files };
-  for (const scenario of manifest.scenarios) {
-    if (next[scenario.story.split("#")[0]]) continue; // Preserve imported story render functions, decorators and args.
-    const page = manifest.pages.find((p) => p.id === scenario.page);
-    if (!page) continue;
-    const relative = (f: string) =>
-      "../" + f.replace(/^src\//, "").replace(/\.tsx?$/, "");
-    const storyFile = `src/stories/${scenario.scenario}.stories.tsx`;
-    scenario.story = `${storyFile}#Scenario`;
-    next[storyFile] =
-      `import { ${page.export} as Page } from ${JSON.stringify(relative(page.file))};\nimport fixture from ${JSON.stringify(relative(scenario.fixture))};\nexport default { title: ${JSON.stringify("Scenarios/" + scenario.scenario)}, component: Page, parameters: { layout: 'fullscreen' } };\nexport const Scenario = { args: fixture };\n`;
-  }
-  return synchronizeRuntime(next, manifest);
 }

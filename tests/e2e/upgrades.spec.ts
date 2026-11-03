@@ -6,11 +6,13 @@ import os from "node:os";
 import path from "node:path";
 import { createApp } from "../../server/app";
 import { registryFixture } from "../registry";
+import { parseRequirements } from "../../server/core/requirements";
+import { synchronizeRuntime } from "../../server/core/project";
 
 test("upgrade review preserves the pinned page until confirmation and exact restoration fails honestly when an old release is unavailable", async ({
   browser,
 }) => {
-  test.setTimeout(240000);
+  test.setTimeout(600000);
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "studio-upgrade-"));
   const registry = await registryFixture(root);
   const prior = process.env.npm_config_userconfig,
@@ -21,19 +23,21 @@ test("upgrade review preserves the pinned page until confirmation and exact rest
   for (const [version, color] of [
     ["1.0.0", "#e9f5ef"],
     ["2.0.0", "#edf0fc"],
+    ["3.0.0", "#edf0fc"],
   ])
     await registry.publish(
       {
         name,
         version,
         type: "module",
-        exports: { ".": { types: "./index.d.ts", default: "./index.js" } },
+        exports: { ".": { types: "./index.d.ts", default: "./index.js" }, [version === "1.0.0" ? "./tokens.css" : "./theme.css"]: version === "1.0.0" ? "./tokens.css" : "./theme.css" },
         types: "./index.d.ts",
         peerDependencies: { react: "^19.3.1" },
         studio: "./studio.json",
       },
       {
-        "index.js": `import {createElement as h} from 'react';export function Card({children}){return h('article',{style:{backgroundColor:'${color}',padding:24}},children)}`,
+        [version === "1.0.0" ? "tokens.css" : "theme.css"]: ":root { --fixture-gap: 24px; }",
+        "index.js": `import {createElement as h,useState} from 'react';export function Card({children}){const [done,setDone]=useState(false);return h('article',{onClick:${version === '3.0.0' ? 'undefined' : '()=>setDone(true)'},style:{backgroundColor:'${color}',padding:24}},children,done?h('span',{role:'status'},'Acknowledged'):null)}`,
         "index.d.ts": `import type {ReactNode} from 'react';export declare function Card(props:{children?:ReactNode}):ReactNode;`,
         "studio.json": JSON.stringify({
           schemaVersion: 1,
@@ -42,6 +46,7 @@ test("upgrade review preserves the pinned page until confirmation and exact rest
               name: "Card",
               export: "Card",
               description: "A grouping surface.",
+              styles: [name + (version === "1.0.0" ? "/tokens.css" : "/theme.css")],
               props: {},
               children: true,
               examples: [
@@ -84,7 +89,7 @@ test("upgrade review preserves the pinned page until confirmation and exact rest
       base: data.snapshot.id,
       files: {
         "requirements/notice.feature":
-          "Feature: Notice\nScenario: Read\nGiven a notice exists\nThen it is visible\n",
+          "Feature: Notice\nScenario: Read\nGiven a notice exists\nWhen I acknowledge the notice\nThen it is acknowledged\n",
       },
       scope: ["requirements"],
     });
@@ -111,6 +116,23 @@ test("upgrade review preserves the pinned page until confirmation and exact rest
         component: data.snapshot.manifest.libraries[0].components[0],
       },
     });
+    data = (await request(`/projects/${id}`)).data;
+    const scenario = parseRequirements(data.snapshot.files, data.snapshot.manifest.scope).scenarios[0];
+    const fixture = "src/scenarios/notice.ts";
+    const story = "src/pages/Notice.stories.tsx";
+    const manifest = { ...data.snapshot.manifest, scenarios: [{
+      scenario: scenario.id, page: "page", story: story + "#Read", fixture, accepted: true,
+      steps: [
+        { step: scenario.steps[0].id, action: "text" as const, role: "article", name: "", value: "Stable notice" },
+        { step: scenario.steps[1].id, action: "click" as const, role: "article", name: "" },
+        { step: scenario.steps[2].id, action: "text" as const, role: "status", name: "", value: "Acknowledged" },
+      ],
+    }] };
+    const files = synchronizeRuntime({ ...data.snapshot.files,
+      [fixture]: "export default {};",
+      [story]: `import {Page} from './Page';export default {title:'Notice',component:Page};export const Read={};`,
+    }, manifest);
+    await studio.store.exclusive(id, () => studio.store.commit(id, data.snapshot.id, files, manifest, "Reviewed notice scenario"));
     data = (await request(`/projects/${id}`)).data;
     const old = data.snapshot;
     await request(`/projects/${id}/history`, {
@@ -149,13 +171,17 @@ test("upgrade review preserves the pinned page until confirmation and exact rest
       "background-color",
       "rgb(237, 240, 252)",
     );
+    expect(impact.quality.ready, JSON.stringify(impact.quality.results)).toBe(true);
+    expect(impact.pages).toHaveLength(1);
     studio.previews.stop(impact.preview.id);
+    for (const page of impact.pages) studio.previews.stop(page.id);
     await request(`/projects/${id}/library`, {
       base: data.snapshot.id,
       name,
       version: "2.0.0",
       registry: registry.base,
       trust: true,
+      confirmation: impact.confirmation,
       apply: true,
     });
     data = (await request(`/projects/${id}`)).data;
@@ -164,6 +190,18 @@ test("upgrade review preserves the pinned page until confirmation and exact rest
       old.files["src/pages/Page.tsx"],
     );
     await show("rgb(237, 240, 252)");
+    const broken = (await request(`/projects/${id}/library`, {
+      base: upgraded.id, name, version: "3.0.0", registry: registry.base, trust: true, apply: false,
+    })).data;
+    expect(broken.quality.ready).toBe(false);
+    const rejected = await request(`/projects/${id}/library`, {
+      base: upgraded.id, name, version: "3.0.0", registry: registry.base, trust: true,
+      apply: true, confirmation: broken.confirmation,
+    }, true);
+    expect(rejected.status).toBe(422);
+    expect((await request(`/projects/${id}`)).data.state.head).toBe(upgraded.id);
+    studio.previews.stop(broken.preview.id);
+    for (const page of broken.pages) studio.previews.stop(page.id);
     await request(`/projects/${id}/history`, {
       action: "restore",
       revision: old.id,

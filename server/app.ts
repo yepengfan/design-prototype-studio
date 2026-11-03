@@ -282,6 +282,7 @@ export async function createApp(options: {
         registry: z.string().optional(),
         trust: z.literal(true),
         apply: z.boolean().default(false),
+        confirmation: z.string().optional(),
       })
       .parse(req.body);
     packageIdentity(body.name, body.version);
@@ -316,6 +317,9 @@ export async function createApp(options: {
       body.version,
       admitted.templates,
     );
+    const previousLibrary = snapshot.manifest.libraries.find((library) => library.name === body.name);
+    const retainedStyles = new Set(libraries.flatMap((library) => library.components.flatMap((component) => component.styles)));
+    const previousStyles = new Set(previousLibrary?.components.flatMap((component) => component.styles) ?? []);
     const manifest = {
       ...snapshot.manifest,
       libraries: [
@@ -329,7 +333,7 @@ export async function createApp(options: {
       ],
       styles: [
         ...new Set([
-          ...snapshot.manifest.styles,
+          ...snapshot.manifest.styles.filter((style) => !previousStyles.has(style) || retainedStyles.has(style)),
           ...admitted.components.flatMap((c) => c.styles),
         ]),
       ],
@@ -345,9 +349,20 @@ export async function createApp(options: {
       candidate,
       admitted.components,
     );
-    if (!body.apply)
+    const upgrading = !!previousLibrary && previousLibrary.version !== body.version;
+    const confirmation = digest({ files: candidate.files, manifest });
+    const quality = upgrading && manifest.scope.length
+      ? await checkQuality(candidate, previews, path.join(root, "screenshots"))
+      : undefined;
+    if (!body.apply) {
+      const pages = upgrading ? await Promise.all(manifest.pages.map(async (page) => ({
+        ...await previews.start(candidate, undefined, undefined, page.id), title: page.title,
+      }))) : [];
       return res.json({
         preview: libraryPreview,
+        pages,
+        quality,
+        confirmation,
         components: admitted.components,
         warnings: [...admitted.warnings, ...publishedTemplates.warnings],
         templates: publishedTemplates.templates.map((t) => ({
@@ -358,9 +373,14 @@ export async function createApp(options: {
           ?.version,
         next: body.version,
         message:
-          "Review these components and version changes, then import this exact release.",
+          "Review these components, current pages and scenario results, then import this exact release.",
       });
+    }
     previews.stop(libraryPreview.id);
+    if (upgrading && body.confirmation !== confirmation)
+      throw new StudioError("Preview and confirm this exact upgrade against the current project first.", 409);
+    if (quality && !quality.ready)
+      throw new StudioError("The upgrade failed reviewed project scenarios. The current release was kept.", 422, quality.results);
     for (const template of publishedTemplates.templates)
       await atomicJSON(
         path.join(options.root, "templates", template.id + ".json"),

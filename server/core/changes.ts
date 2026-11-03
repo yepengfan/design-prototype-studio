@@ -13,7 +13,7 @@ import {
 import { validateFiles, digest, safeRelative } from "./files.js";
 import { parseRequirements } from "./requirements.js";
 import { synchronizeRuntime } from "./project.js";
-import { anchors } from "./source.js";
+import { anchors, validateCapabilities } from "./source.js";
 import { closureDiagnostics } from "./archive.js";
 
 export const differences = (before: Files, after: Files) =>
@@ -124,6 +124,13 @@ function withoutPresentation(source: string, components: Component[]) {
     )
       declaration.remove();
   }
+  const transparent = (node: ts.Node): node is ts.JsxElement | ts.JsxFragment =>
+    ts.isJsxFragment(node) || (ts.isJsxElement(node) &&
+      ["div", "section"].includes(node.openingElement.tagName.getText()) &&
+      node.openingElement.attributes.properties.length === 0);
+  const flatten = (node: ts.Node): ts.Node[] => transparent(node)
+    ? node.children.flatMap(flatten)
+    : ts.isJsxText(node) && !node.text.trim() ? [] : [node];
   const fingerprint = (node: ts.Node): unknown => {
     if (
       ts.isStringLiteralLike(node) ||
@@ -134,7 +141,7 @@ function withoutPresentation(source: string, components: Component[]) {
       return [node.kind, node.text];
     const children: unknown[] = [];
     ts.forEachChild(node, (child) => {
-      children.push(fingerprint(child));
+      children.push(...flatten(child).map(fingerprint));
     });
     return [node.kind, children];
   };
@@ -456,6 +463,7 @@ export function prepareChange(
           );
       }
     }
+  validateCapabilities(files, manifest);
   const finalFiles = synchronizeRuntime(files, manifest);
   return {
     id: randomUUID(),
@@ -526,21 +534,4 @@ export function rebaseProposal(
     manifestChanges: undefined,
     manifest: manifestChanged ? proposedManifest : current.manifest,
   };
-}
-export function replayChanges(
-  base: Files,
-  changes: { before: Files; after: Files }[],
-) {
-  const files = { ...base };
-  for (const change of changes)
-    for (const d of differences(change.before, change.after)) {
-      if ((files[d.file] ?? "") !== d.before)
-        throw new StudioError(
-          `Accepted changes depend on the same source: ${d.file}. Choose to undo dependent results together or keep the current page.`,
-          409,
-        );
-      if (d.removed) delete files[d.file];
-      else files[d.file] = d.after;
-    }
-  return files;
 }
