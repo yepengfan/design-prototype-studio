@@ -1,8 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { StudioError } from "./contracts.js";
 
-export function stopChild(child: ChildProcess) {
-  if (!child.pid) return;
+export function stopChild(child: ChildProcess, graceMs = 3000) {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null)
+    return;
   try {
     process.kill(-child.pid, "SIGTERM");
   } catch {
@@ -14,9 +15,10 @@ export function stopChild(child: ChildProcess) {
     } catch {
       /* already exited */
     }
-  }, 3000);
+  }, graceMs);
+  // A tool can exit before descendants that ignore SIGTERM. Keep escalation
+  // scheduled for the owned process group until the grace period expires.
   timer.unref();
-  child.once("exit", () => clearTimeout(timer));
 }
 export function runCommand(
   command: string,
@@ -30,6 +32,8 @@ export function runCommand(
 ) {
   return new Promise<{ stdout: string; stderr: string; code: number }>(
     (resolve, reject) => {
+      if (options.signal?.aborted)
+        return reject(new StudioError("The local task was cancelled.", 409));
       const child = spawn(command, args, {
         cwd,
         env: { ...process.env, ...options.env },
@@ -62,7 +66,9 @@ export function runCommand(
       child.once("exit", (code) => {
         clearTimeout(timeout);
         options.signal?.removeEventListener("abort", cancel);
-        if (timedOut)
+        if (options.signal?.aborted)
+          reject(new StudioError("The local task was cancelled.", 409));
+        else if (timedOut)
           reject(new StudioError(`${command} exceeded its time limit.`, 408));
         else resolve({ stdout, stderr, code: code ?? 1 });
       });

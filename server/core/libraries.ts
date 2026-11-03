@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import semver from "semver";
+import { publishedStories } from "./published-stories.js";
 import { componentReference } from "./component-reference.js";
 import { Project, Node, ts } from "ts-morph";
 import {
@@ -12,6 +13,50 @@ import {
 import { safeRelative, writeFiles } from "./files.js";
 import { npmFailure, registryURL, runCommand } from "./process.js";
 
+/** External JSX building blocks need the same published contract on legacy import. */
+export function referencedComponentPackages(files: Files) {
+  const packages = new Set<string>();
+  const project = new Project({ useInMemoryFileSystem: true });
+  for (const [name, content] of Object.entries(files)) {
+    if (!/\.[tj]sx$/.test(name)) continue;
+    const source = project.createSourceFile(name, content);
+    const tags = new Set(
+      source
+        .getDescendants()
+        .filter(
+          (node) =>
+            Node.isJsxOpeningElement(node) ||
+            Node.isJsxSelfClosingElement(node),
+        )
+        .map((node) => node.getTagNameNode().getText().split(".")[0]),
+    );
+    for (const declaration of source.getImportDeclarations()) {
+      const specifier = declaration.getModuleSpecifierValue();
+      if (
+        specifier.startsWith(".") ||
+        specifier === "react" ||
+        specifier.startsWith("react/")
+      )
+        continue;
+      const locals = [
+        declaration.getDefaultImport()?.getText(),
+        declaration.getNamespaceImport()?.getText(),
+        ...declaration
+          .getNamedImports()
+          .map(
+            (binding) => binding.getAliasNode()?.getText() ?? binding.getName(),
+          ),
+      ];
+      if (locals.some((local) => local && tags.has(local)))
+        packages.add(
+          specifier.startsWith("@")
+            ? specifier.split("/").slice(0, 2).join("/")
+            : specifier.split("/")[0],
+        );
+    }
+  }
+  return [...packages];
+}
 export function packageIdentity(name: string, version: string) {
   if (
     !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name) ||
@@ -27,6 +72,7 @@ export async function installProject(
   files: Files,
   registries: { name: string; registry?: string }[] = [],
   updateLock = false,
+  signal?: AbortSignal,
 ) {
   await fs.mkdir(root, { recursive: true });
   await writeFiles(root, files);
@@ -55,6 +101,7 @@ export async function installProject(
   );
   const result = await runCommand("npm", args, root, {
     timeout: 180_000,
+    signal,
     env: { npm_config_save_exact: "true" },
   });
   if (result.code) throw new StudioError(npmFailure(result.stderr), 422);
@@ -140,20 +187,24 @@ export async function inspectLibrary(
     const readme = await fs
       .readFile(path.join(root, "README.md"), "utf8")
       .catch(() => "");
+    const stories = await publishedStories(await fs.realpath(root), name);
     const checker = project.getTypeChecker();
     for (const [symbolName, declarations] of file.getExportedDeclarations()) {
       const declaration = declarations[0];
       const type = declaration.getType();
-      const signature = type.getCallSignatures()[0];
-      if (!signature || !/^[A-Z]/.test(symbolName)) continue;
+      const signature = type.getCallSignatures()[0] ?? type.getConstructSignatures()[0];
+      const componentName=symbolName==="default" && (Node.isFunctionDeclaration(declaration)||Node.isClassDeclaration(declaration)||Node.isVariableDeclaration(declaration)) ? declaration.getName() ?? "Default component" : symbolName;
+      if (!signature || (symbolName!=="default" && !/^[A-Z]/.test(symbolName))) continue;
       const symbol = declaration.getSymbol();
-      const description = symbol
+      const declaredDescription = symbol
         ? ts.displayPartsToString(
             symbol.compilerSymbol.getDocumentationComment(
               checker.compilerObject,
             ),
           )
         : "";
+      const description =
+        declaredDescription || stories.get(symbolName)?.description || "";
       const propsType = signature
         .getParameters()[0]
         ?.getTypeAtLocation(declaration);
@@ -202,7 +253,22 @@ export async function inspectLibrary(
           description: doc,
           options,
           required,
-          business: tags.some((t) => t.name === "business"),
+          business:
+            tags.some((t) => t.name === "business") ||
+            [
+              "value",
+              "defaultValue",
+              "checked",
+              "defaultChecked",
+              "required",
+              "disabled",
+              "readOnly",
+              "min",
+              "max",
+              "pattern",
+              "minLength",
+              "maxLength",
+            ].includes(pname),
         };
       }
       const examples: Component["examples"] = [];
@@ -225,7 +291,7 @@ export async function inspectLibrary(
             (n) => Node.isJsxElement(n) || Node.isJsxSelfClosingElement(n),
           )) {
           const op = Node.isJsxElement(jsx) ? jsx.getOpeningElement() : jsx;
-          if (op.getTagNameNode().getText() !== symbolName) continue;
+          if (op.getTagNameNode().getText() !== componentName) continue;
           const values: Record<string, unknown> = {};
           let valid = true;
           for (const attr of op.getAttributes()) {
@@ -264,7 +330,9 @@ export async function inspectLibrary(
         }
         sample.forget();
       }
-      if (unsupportedRequired || !examples.length) {
+      const published = stories.get(symbolName)?.examples ?? [];
+      examples.push(...published);
+      if ((unsupportedRequired && !published.length) || !examples.length) {
         warnings.push(
           `${symbolName}: a required non-scalar property or a runnable documented example needs a library update.`,
         );
@@ -272,7 +340,7 @@ export async function inspectLibrary(
       }
       components.push(
         componentSchema.parse({
-          name: symbolName,
+          name: componentName,
           export: symbolName,
           description,
           package: name,
@@ -281,6 +349,7 @@ export async function inspectLibrary(
           props,
           children,
           examples,
+          requiresBehavior: unsupportedRequired,
         }),
       );
     }
@@ -291,9 +360,33 @@ export async function inspectLibrary(
       422,
       warnings,
     );
+  const declarations = pkg.types ?? pkg.typings ?? pkg.exports?.["."]?.types;
+  const api =
+    typeof declarations === "string"
+      ? await fs
+          .readFile(within(root, declarations), "utf8")
+          .catch(() => undefined)
+      : undefined;
+  const documentation = await fs
+    .readFile(path.join(root, "README.md"), "utf8")
+    .catch(() => undefined);
+  for (const component of components) {
+    // Supply published callback/controlled-value contracts to generation too.
+    // Scalar visual properties alone do not describe interaction semantics.
+    if (api && Buffer.byteLength(api) <= 200_000) component.api = api;
+    if (documentation && Buffer.byteLength(documentation) <= 40_000)
+      component.documentation = documentation;
+  }
   // Verify symbols against actual runtime exports in the preview/build phase, never import package code into this service.
   for (const c of components) {
     componentReference(c.export);
+    for (const example of c.examples)
+      if (example.story) {
+        within(root, example.story.file);
+        if (example.story.annotations) within(root, example.story.annotations);
+        if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(example.story.export))
+          throw new StudioError("Published story export is invalid.");
+      }
     for (const style of c.styles) {
       if (
         !style.startsWith(name + "/") ||

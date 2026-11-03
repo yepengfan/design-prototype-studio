@@ -18,6 +18,7 @@ import {
   inspectLibrary,
   readLibraryTemplates,
   packageIdentity,
+  referencedComponentPackages,
 } from "./core/libraries.js";
 import { exportArchive, inspectImport, readArchive } from "./core/archive.js";
 import { LocalAI } from "./core/ai.js";
@@ -31,7 +32,11 @@ import { Annotations } from "./core/annotations.js";
 import { templateInput } from "./core/templates.js";
 import { checkQuality } from "./core/quality.js";
 
-export async function createApp(options: { root: string; origin: string }) {
+export async function createApp(options: {
+  root: string;
+  origin: string;
+  ai?: Pick<LocalAI, "generate" | "cancel" | "close">;
+}) {
   const app = express();
   const secret = randomBytes(32).toString("hex");
   const store = new ProjectStore(path.join(options.root, "projects"));
@@ -39,7 +44,7 @@ export async function createApp(options: { root: string; origin: string }) {
     path.join(options.root, "previews"),
     options.origin,
   );
-  const ai = new LocalAI(path.join(options.root, "ai"));
+  const ai = options.ai ?? new LocalAI(path.join(options.root, "ai"));
   const annotations = new Annotations(store, (s) => previews.verify(s));
   await store.recoverRuns();
   app.disable("x-powered-by");
@@ -108,6 +113,7 @@ export async function createApp(options: { root: string; origin: string }) {
             409,
           );
         const added: Record<string, string> = {};
+        const convertedScope: Record<string, string[]> = {};
         for (const [file, content] of Object.entries(body.files)) {
           safeRelative(file);
           if (file.endsWith(".md")) {
@@ -118,6 +124,9 @@ export async function createApp(options: { root: string; origin: string }) {
                 422,
                 converted.proposals,
               );
+            convertedScope[file] = converted.proposals.map((_, index) =>
+              file.replace(/\.md$/, `-${index + 1}.feature`),
+            );
             converted.proposals.forEach((text, i) => {
               added[file.replace(/\.md$/, `-${i + 1}.feature`)] = text;
             });
@@ -127,14 +136,17 @@ export async function createApp(options: { root: string; origin: string }) {
               "Choose .feature requirements or Markdown containing Gherkin.",
             );
         }
+        const scope = body.scope.flatMap(
+          (selected) => convertedScope[selected] ?? [selected],
+        );
         if (state.templateReconciliation) {
           const requirements = {
             ...state.templateReconciliation.requirements,
             ...added,
           };
-          if (!parseRequirements(requirements, body.scope).scenarios.length)
+          if (!parseRequirements(requirements, scope).scenarios.length)
             throw new StudioError("Select at least one scenario.");
-          state.templateReconciliation = { requirements, scope: body.scope };
+          state.templateReconciliation = { requirements, scope: scope };
           await store.saveState(state);
           return store.get(req.params.id);
         }
@@ -149,9 +161,9 @@ export async function createApp(options: { root: string; origin: string }) {
             "These requirements already have an implementation. Describe the business change in a prompt so the requirements and page can be reviewed and updated together.",
           );
         const files = { ...snapshot.files, ...added };
-        const manifest = { ...snapshot.manifest, scope: body.scope };
-        const scope = parseRequirements(files, manifest.scope);
-        if (!scope.scenarios.length)
+        const manifest = { ...snapshot.manifest, scope: scope };
+        const parsedScope = parseRequirements(files, manifest.scope);
+        if (!parsedScope.scenarios.length)
           throw new StudioError(
             "Select at least one scenario in the working scope.",
           );
@@ -170,6 +182,11 @@ export async function createApp(options: { root: string; origin: string }) {
     res.json(
       await store.exclusive(req.params.id, async () => {
         const { snapshot, state } = await store.get(req.params.id);
+        if (snapshot.id !== body.base)
+          throw new StudioError(
+            "The page changed. Select its current component before editing.",
+            409,
+          );
         if (state.templateReconciliation)
           throw new StudioError(
             "Adapt and review this template against the selected requirements before visual editing.",
@@ -182,6 +199,31 @@ export async function createApp(options: { root: string; origin: string }) {
         const page = snapshot.manifest.pages.find((p) => p.id === body.page);
         if (!page) throw new StudioError("Page not found.");
         const edit = { ...body.edit, confirmedBusiness: false };
+        if (edit.operation === "text") {
+          const target = anchors(
+            snapshot.files[page.file],
+            snapshot.manifest.libraries.flatMap(
+              (library) => library.components,
+            ),
+          ).find((node) => node.id === edit.anchor);
+          const previous = target?.text?.trim();
+          const steps = parseRequirements(
+            snapshot.files,
+            snapshot.manifest.scope,
+          ).scenarios.flatMap((scenario) => scenario.steps);
+          if (
+            previous &&
+            String(edit.value) !== target?.text &&
+            (["alert", "status"].includes(String(target?.props.role)) ||
+              steps.some((step) =>
+                step.text.toLowerCase().includes(previous.toLowerCase()),
+              ))
+          )
+            throw new StudioError(
+              "This text describes a selected business requirement or operation result. Use a prompt to review the matching Gherkin difference before changing it.",
+              422,
+            );
+        }
         const source = editSource(
           snapshot.files[page.file],
           edit,
@@ -195,13 +237,39 @@ export async function createApp(options: { root: string; origin: string }) {
           parent: body.base,
         });
         await previews.verify(candidate);
-        return store.commit(
+        const before = anchors(
+          snapshot.files[page.file],
+          snapshot.manifest.libraries.flatMap((l) => l.components),
+        ).find((node) => node.id === edit.anchor);
+        const result = await store.commit(
           req.params.id,
           body.base,
           files,
           snapshot.manifest,
           "Visual edit",
         );
+        const after = anchors(
+          source,
+          snapshot.manifest.libraries.flatMap((l) => l.components),
+        );
+        let selection =
+          before &&
+          after.find(
+            (node) =>
+              node.path === before.path &&
+              (edit.operation === "wrap" || node.tag === before.tag),
+          )?.id;
+        if (edit.operation === "move" && before) {
+          const text = snapshot.files[page.file].slice(
+            before.start,
+            before.end,
+          );
+          const matches = after.filter(
+            (node) => source.slice(node.start, node.end) === text,
+          );
+          selection = matches.length === 1 ? matches[0].id : undefined;
+        }
+        return { ...result, selection };
       }),
     );
   });
@@ -332,7 +400,14 @@ export async function createApp(options: { root: string; origin: string }) {
         provider: c.provider,
       };
     }
-    res.json(await previews.start(snapshot, req.body.scenario, component));
+    res.json(
+      await previews.start(
+        snapshot,
+        req.body.scenario,
+        component,
+        req.body.page,
+      ),
+    );
   });
   app.delete("/api/previews/:id", (req, res) => {
     previews.stop(req.params.id);
@@ -380,6 +455,24 @@ export async function createApp(options: { root: string; origin: string }) {
       ),
     ),
   );
+  app.post(
+    "/api/projects/:id/annotations/:annotation/revise",
+    async (req, res) =>
+      res.json(
+        await annotations.revise(
+          req.params.id,
+          req.params.annotation,
+          z
+            .object({
+              base: z.string(),
+              text: z.string().max(10000),
+              page: z.string(),
+              target: z.string(),
+            })
+            .parse(req.body),
+        ),
+      ),
+  );
   app.post("/api/projects/:id/annotations/approve", async (req, res) =>
     res.json(
       await annotations.approve(
@@ -414,20 +507,11 @@ export async function createApp(options: { root: string; origin: string }) {
         );
       const jobs: Run[] = [];
       for (const annotation of approved) {
-        const page = snapshot.manifest.pages.find(
-          (p) => p.id === annotation.page,
+        const { page, node: target } = await annotations.target(
+          req.params.id,
+          snapshot,
+          annotation,
         );
-        const target =
-          page &&
-          anchors(
-            snapshot.files[page.file],
-            snapshot.manifest.libraries.flatMap((l) => l.components),
-          ).find((n) => n.id === annotation.target);
-        if (annotation.target !== "page" && !target)
-          throw new StudioError(
-            "An annotated item changed. Select its current location and review the annotation before submitting.",
-            409,
-          );
         const job: Run = {
           id: randomUUID(),
           adapter,
@@ -435,8 +519,9 @@ export async function createApp(options: { root: string; origin: string }) {
           status: "queued",
           events: [],
           annotation: annotation.id,
+          page: annotation.page,
           annotationText: annotation.text,
-          prompt: `Apply only this approved annotation on ${target ? `${page!.title}: ${target.component?.name ?? target.tag}` : "the current page"}: ${annotation.text}. Preserve all accepted independent edits. Diagnose shared behavior or requirement dependencies instead of overwriting them.`,
+          prompt: `Apply only this approved annotation on ${target ? `${page!.title}: ${target.component?.name ?? target.tag}, source ${snapshot.files[page.file].slice(target.start, target.end)}` : "the current page"}: ${annotation.text}. Preserve all accepted independent edits. Diagnose shared behavior or requirement dependencies instead of overwriting them.`,
         };
         jobs.push(job);
         state.runs.push(job);
@@ -457,6 +542,7 @@ export async function createApp(options: { root: string; origin: string }) {
         adapter: z.enum(["codex", "cursor"]),
         prompt: z.string().trim().min(1).max(20000),
         annotation: z.string().optional(),
+        page: z.string().optional(),
       })
       .parse(req.body);
     const run = await store.exclusive(req.params.id, async () => {
@@ -478,10 +564,27 @@ export async function createApp(options: { root: string; origin: string }) {
         throw new StudioError(
           "Review and approve the annotation batch before submitting.",
         );
+      const location = annotation
+        ? await annotations.target(req.params.id, snapshot, annotation)
+        : undefined;
+      const targetPage =
+        location?.page ??
+        (body.page
+          ? snapshot.manifest.pages.find((page) => page.id === body.page)
+          : snapshot.manifest.pages[0]);
+      if (!targetPage)
+        throw new StudioError(
+          "Select a current page before requesting an edit.",
+          422,
+        );
       const run: Run = {
         id: randomUUID(),
+        page: targetPage.id,
         adapter: body.adapter,
-        prompt: body.prompt,
+        prompt:
+          location && annotation
+            ? `Apply only this approved annotation on ${location.page.title}: ${location.node ? `${location.node.component?.name ?? location.node.tag}, source ${snapshot.files[location.page.file].slice(location.node.start, location.node.end)}` : "whole page"}: ${annotation.text}. Preserve accepted independent work.`
+            : body.prompt,
         base: snapshot.id,
         events: [],
         status: "queued",
@@ -522,17 +625,26 @@ export async function createApp(options: { root: string; origin: string }) {
       const snapshot = await store.snapshot(project, run.base);
       const pending = (await store.get(project)).state.templateReconciliation;
       const selected = templateInput(snapshot, pending);
+      const currentPage = snapshot.manifest.pages.find(
+        (page) => page.id === run.page,
+      );
+      const currentPrompt = currentPage
+        ? `Current designer page: ${currentPage.title} (${currentPage.file}). Apply current-page edits here. Generate additional pages only when the selected requirements require them; preserve unrelated pages and do not invent connections. ${run.prompt}`
+        : run.prompt;
       const request = pending
         ? {
             ...run,
-            prompt: `Adapt the template to ONLY these newly selected requirements. Its prior requirements are context for conflicts, not additional scope: ${JSON.stringify(parseRequirements(snapshot.files, snapshot.manifest.scope))}. Propose source and requirements together and ask about unclear business adjustments. ${run.prompt}`,
+            prompt: `Adapt the template to ONLY these newly selected requirements. Its prior requirements are context for conflicts, not additional scope: ${JSON.stringify(parseRequirements(snapshot.files, snapshot.manifest.scope))}. Propose source and requirements together and ask about unclear business adjustments. ${currentPrompt}`,
           }
-        : run;
+        : { ...run, prompt: currentPrompt };
       let proposal = await ai.generate(request, selected, update);
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           if (!["gap", "clarification"].includes(proposal.kind)) {
-            const change = prepareChange(snapshot, proposal, pending?.scope);
+            const change = prepareChange(snapshot, proposal, pending?.scope, {
+              repair: run.repair,
+              page: run.page,
+            });
             const candidate = await store.persist(project, {
               parent: run.base,
               label: proposal.summary,
@@ -540,6 +652,8 @@ export async function createApp(options: { root: string; origin: string }) {
               manifest: change.manifest,
             });
             await previews.verify(candidate);
+            if (change.behavior || run.repair)
+              await verifyScenarioCandidate(project, candidate, run.repair);
           }
           break;
         } catch (error) {
@@ -590,8 +704,11 @@ export async function createApp(options: { root: string; origin: string }) {
         }
         const a = state.annotations.find((a) => a.id === run.annotation);
         if (a) {
-          a.status = "failed";
-          a.message = r.error;
+          a.status = r.status === "cancelled" ? "pending" : "failed";
+          a.message =
+            r.status === "cancelled"
+              ? "Processing cancelled. The annotation is preserved for another attempt."
+              : r.error;
         }
         await store.saveState(state);
       });
@@ -603,6 +720,14 @@ export async function createApp(options: { root: string; origin: string }) {
       const run = state.runs.find((r) => r.id === req.params.run);
       if (!run) throw new StudioError("Request not found.");
       run.status = "cancelled";
+      const annotation = state.annotations.find(
+        (annotation) => annotation.id === run.annotation,
+      );
+      if (annotation) {
+        annotation.status = "pending";
+        annotation.message =
+          "Processing cancelled. The annotation is preserved for another attempt.";
+      }
       await store.saveState(state);
     });
     await ai.cancel(req.params.run);
@@ -628,28 +753,43 @@ export async function createApp(options: { root: string; origin: string }) {
         hash: digest(after.files),
       });
     }
-    res.json(
-      prepareChange(
+    const change = prepareChange(
+      snapshot,
+      rebaseProposal(
+        await store.snapshot(req.params.id, run.base),
         snapshot,
-        rebaseProposal(
-          await store.snapshot(req.params.id, run.base),
-          snapshot,
-          run.proposal,
-        ),
-        state.templateReconciliation?.scope,
+        run.proposal,
       ),
+      state.templateReconciliation?.scope,
+      { repair: run.repair, page: run.page },
     );
+    res.json({
+      ...change,
+      ...(await annotations.impact(
+        req.params.id,
+        snapshot,
+        state,
+        change.files,
+        run.proposal,
+      )),
+    });
   });
   app.post("/api/projects/:id/runs/:run/preview", async (req, res) => {
     const { state, snapshot } = await store.get(req.params.id);
     const run = state.runs.find((r) => r.id === req.params.run);
-    if (run?.appliedRevision)
+    if (run?.appliedRevision) {
+      const applied = await store.snapshot(req.params.id, run.appliedRevision);
+      const scenario =
+        !run.page ||
+        applied.manifest.scenarios.find(
+          (binding) => binding.scenario === req.body.scenario,
+        )?.page === run.page
+          ? req.body.scenario
+          : undefined;
       return res.json(
-        await previews.start(
-          await store.snapshot(req.params.id, run.appliedRevision),
-          req.body.scenario,
-        ),
+        await previews.start(applied, scenario, undefined, run.page),
       );
+    }
     if (!run?.proposal || run.status !== "review")
       throw new StudioError("Choose a pending result before previewing.");
     const change = prepareChange(
@@ -660,6 +800,7 @@ export async function createApp(options: { root: string; origin: string }) {
         run.proposal,
       ),
       state.templateReconciliation?.scope,
+      { repair: run.repair, page: run.page },
     );
     const candidate = await store.persist(req.params.id, {
       files: change.files,
@@ -668,7 +809,14 @@ export async function createApp(options: { root: string; origin: string }) {
       parent: snapshot.id,
     });
     await previews.verify(candidate);
-    res.json(await previews.start(candidate, req.body.scenario));
+    const scenario =
+      !run.page ||
+      candidate.manifest.scenarios.find(
+        (binding) => binding.scenario === req.body.scenario,
+      )?.page === run.page
+        ? req.body.scenario
+        : undefined;
+    res.json(await previews.start(candidate, scenario, undefined, run.page));
   });
   app.post("/api/projects/:id/runs/:run/apply", async (req, res) => {
     res.json(
@@ -677,11 +825,17 @@ export async function createApp(options: { root: string; origin: string }) {
         const run = state.runs.find((r) => r.id === req.params.run);
         if (!run?.proposal || run.status !== "review")
           throw new StudioError("Choose a validated pending proposal.");
+        if (run.repair && run.base !== snapshot.id)
+          throw new StudioError(
+            "Accepted work changed after these repair checks. Check delivery again from the current page.",
+            409,
+          );
         const original = await store.snapshot(req.params.id, run.base);
         const change = prepareChange(
           snapshot,
           rebaseProposal(original, snapshot, run.proposal),
           state.templateReconciliation?.scope,
+          { repair: run.repair, page: run.page },
         );
         if (
           change.requiresConfirmation &&
@@ -691,16 +845,53 @@ export async function createApp(options: { root: string; origin: string }) {
             "Review and confirm the corresponding Gherkin difference before applying.",
             422,
           );
+        const impact = await annotations.impact(
+          req.params.id,
+          snapshot,
+          state,
+          change.files,
+          run.proposal,
+        );
+        if (
+          impact.affectedAcceptedResults.length &&
+          req.body.confirmAcceptedResults !== impact.acceptedResultsConfirmation
+        )
+          throw new StudioError(
+            "This rework affects accepted annotation results. Review the listed results and explicitly choose whether to replace them or leave this proposal pending.",
+            409,
+            impact.affectedAcceptedResults,
+          );
+        const replaced = new Set(
+          impact.affectedAcceptedResults.map((result) => result.id),
+        );
+        const activeResults = (snapshot.activeAnnotationResults ?? []).filter(
+          (id) => !replaced.has(id),
+        );
         const candidate = await store.persist(req.params.id, {
           files: change.files,
           manifest: change.manifest,
           label: change.summary,
           parent: snapshot.id,
           activeAnnotationResults: run.annotation
-            ? [...(snapshot.activeAnnotationResults ?? []), run.id]
-            : snapshot.activeAnnotationResults,
+            ? [...activeResults, run.id]
+            : activeResults,
         });
         await previews.verify(candidate);
+        if (change.behavior || run.repair)
+          await verifyScenarioCandidate(req.params.id, candidate, run.repair);
+        for (const note of state.annotations)
+          if (
+            note.status === "accepted" &&
+            !candidate.activeAnnotationResults?.some(
+              (id) =>
+                state.runs.find((result) => result.id === id)?.annotation ===
+                note.id,
+            )
+          ) {
+            note.status = "pending";
+            note.message =
+              "A reviewed rework replaced this result. Its annotation is preserved for further adjustment.";
+          }
         run.appliedBase = snapshot.id;
         run.appliedRevision = candidate.id;
         state.head = candidate.id;
@@ -717,6 +908,81 @@ export async function createApp(options: { root: string; origin: string }) {
         }
         await store.saveState(state);
         return store.get(req.params.id);
+      }),
+    );
+  });
+  app.get("/api/projects/:id/stories", async (req, res) => {
+    const { snapshot } = await store.get(req.params.id);
+    await previews.verify(snapshot, true);
+    const book = await previews.startStorybook(snapshot);
+    try {
+      res.json(
+        book.stories.map((story) => ({
+          story: story.importPath.replace(/^\.\//, "") + "#" + story.exportName,
+          name: story.exportName,
+        })),
+      );
+    } finally {
+      previews.stop(book.id);
+    }
+  });
+  app.post("/api/projects/:id/scenarios/:scenario/map", async (req, res) => {
+    const body = z
+      .object({ base: z.string(), story: z.string(), page: z.string() })
+      .parse(req.body);
+    res.json(
+      await store.exclusive(req.params.id, async () => {
+        const { snapshot } = await store.get(req.params.id);
+        if (snapshot.id !== body.base)
+          throw new StudioError(
+            "The page changed. Review the current scenario mapping again.",
+            409,
+          );
+        if (
+          !parseRequirements(
+            snapshot.files,
+            snapshot.manifest.scope,
+          ).scenarios.some((scenario) => scenario.id === req.params.scenario) ||
+          !snapshot.manifest.pages.some((page) => page.id === body.page)
+        )
+          throw new StudioError("Choose a current requirement and page.");
+        await previews.verify(snapshot, true);
+        const book = await previews.startStorybook(snapshot);
+        try {
+          if (
+            !book.stories.some(
+              (story) =>
+                story.importPath.replace(/^\.\//, "") +
+                  "#" +
+                  story.exportName ===
+                body.story,
+            )
+          )
+            throw new StudioError(
+              "Choose an existing original Storybook story.",
+            );
+        } finally {
+          previews.stop(book.id);
+        }
+        const manifest = structuredClone(snapshot.manifest);
+        manifest.scenarios = manifest.scenarios.filter(
+          (binding) => binding.scenario !== req.params.scenario,
+        );
+        manifest.scenarios.push({
+          scenario: req.params.scenario,
+          page: body.page,
+          story: body.story,
+          fixture: body.story.split("#")[0],
+          accepted: false,
+          steps: [],
+        });
+        return store.commit(
+          req.params.id,
+          snapshot.id,
+          synchronizeRuntime(snapshot.files, manifest),
+          manifest,
+          "Map requirement to original scenario story",
+        );
       }),
     );
   });
@@ -760,6 +1026,24 @@ export async function createApp(options: { root: string; origin: string }) {
       }),
     );
   });
+  async function verifyScenarioCandidate(
+    _project: string,
+    snapshot: import("./core/contracts.js").Snapshot,
+    repair = false,
+  ) {
+    const root = path.join(options.root, "quality", snapshot.id);
+    await fs.mkdir(root, { recursive: true });
+    const report = await checkQuality(snapshot, previews, root, {
+      requireReviewed: repair,
+    });
+    await atomicJSON(path.join(root, "candidate-report.json"), report);
+    if (!report.ready)
+      throw new StudioError(
+        "The staged implementation does not yet satisfy its scenario checks. Accepted work is unchanged.",
+        422,
+        report.results,
+      );
+  }
   app.post("/api/projects/:id/quality", async (req, res) => {
     const { snapshot, state } = await store.get(req.params.id);
     if (state.templateReconciliation)
@@ -770,7 +1054,61 @@ export async function createApp(options: { root: string; origin: string }) {
     await fs.mkdir(root, { recursive: true });
     const report = await checkQuality(snapshot, previews, root);
     await atomicJSON(path.join(root, "report.json"), report);
-    res.json(report);
+    if ((await store.get(req.params.id)).snapshot.id !== snapshot.id)
+      throw new StudioError(
+        "The page changed during these checks. Run delivery checks on the current page.",
+        409,
+      );
+    const scope = parseRequirements(snapshot.files, snapshot.manifest.scope);
+    let repairRun: Run | undefined;
+    // Missing business facts, absent mappings and unreviewed checks require a
+    // designer decision. Only an existing fully reviewed plan authorizes repair.
+    if (
+      !report.ready &&
+      scope.scenarios.length &&
+      scope.scenarios.every((scenario) => {
+        const binding = snapshot.manifest.scenarios.find(
+          (binding) => binding.scenario === scenario.id,
+        );
+        return (
+          binding?.accepted &&
+          scenario.steps.every((step) =>
+            binding.steps.some((test) => test.step === step.id),
+          )
+        );
+      })
+    ) {
+      repairRun = await store.exclusive(req.params.id, async () => {
+        const { state, snapshot: current } = await store.get(req.params.id);
+        if (
+          current.id !== snapshot.id ||
+          state.runs.some((run) => ["queued", "running"].includes(run.status))
+        )
+          return undefined;
+        const existing = state.runs.find(
+          (run) => run.repair && run.base === snapshot.id,
+        );
+        if (existing) return existing;
+        const run: Run = {
+          id: randomUUID(),
+          adapter: z
+            .enum(["codex", "cursor"])
+            .default("codex")
+            .parse(req.body.adapter),
+          base: snapshot.id,
+          status: "queued",
+          events: [],
+          repair: true,
+          prompt: `Repair the existing implementation to meet its unchanged reviewed Gherkin and executable scenario plans. Keep requirements, manifest, test plans and dependency/tooling configuration exactly unchanged. Preserve unrelated source. Return a gap or clarification for missing library capabilities or business facts; do not invent controls or weaken checks. The current accepted snapshot fails: ${JSON.stringify(report.results)}`,
+        };
+        state.runs.push(run);
+        await store.saveState(state);
+        return run;
+      });
+      if (repairRun?.status === "queued")
+        void execute(req.params.id, repairRun).catch(() => {});
+    }
+    res.json({ ...report, revision: snapshot.id, repairRun: repairRun?.id });
   });
   app.get("/api/projects/:id/export", async (req, res) => {
     const { snapshot, state } = await store.get(req.params.id);
@@ -789,14 +1127,60 @@ export async function createApp(options: { root: string; origin: string }) {
         archive: z.string(),
         requirements: filesSchema.optional(),
         confirm: z.boolean().optional(),
+        confirmMarkdown: z.boolean().optional(),
+        previewStories: z.record(z.string(), z.string()).optional(),
       })
       .parse(req.body);
+    const requirements: Record<string, string> = {};
+    const markdownProposals: { file: string; source: string }[] = [];
+    for (const [file, source] of Object.entries(body.requirements ?? {})) {
+      safeRelative(file);
+      if (file.endsWith(".md")) {
+        const converted = markdownRequirements(source);
+        converted.proposals.forEach((content, index) => {
+          const name = file.replace(/\.md$/, `-${index + 1}.feature`);
+          requirements[name] = content;
+          markdownProposals.push({ file: name, source: content });
+        });
+      } else if (file.endsWith(".feature")) requirements[file] = source;
+      else
+        throw new StudioError(
+          "Supply .feature requirements or Markdown containing Gherkin blocks.",
+        );
+    }
+    if (body.confirm && markdownProposals.length && !body.confirmMarkdown)
+      throw new StudioError(
+        "Review the extracted Markdown requirements and confirm discrepancies before opening this source.",
+        422,
+      );
     const inspected = inspectImport(
       readArchive(Buffer.from(body.archive, "base64")),
-      body.requirements,
+      requirements,
     );
     if (inspected.diagnostics.length || !body.confirm)
-      return res.json({ ...inspected, requiresConfirmation: true });
+      return res.json({
+        ...inspected,
+        requiresConfirmation: true,
+        markdownProposals,
+      });
+    if (!inspected.native) {
+      for (const page of inspected.manifest.pages) {
+        const selected = body.previewStories?.[page.id] ?? page.previewStory;
+        if (
+          !selected ||
+          !inspected.stories?.some(
+            (story) =>
+              story.page === page.id &&
+              story.file + "#" + story.name === selected,
+          )
+        )
+          throw new StudioError(
+            "Choose one of this page's original stories as its editing preview.",
+          );
+        page.previewStory = selected;
+      }
+      inspected.files = synchronizeRuntime(inspected.files, inspected.manifest);
+    }
     const candidate = {
       id: digest([inspected.files, inspected.manifest]),
       at: new Date().toISOString(),
@@ -804,6 +1188,28 @@ export async function createApp(options: { root: string; origin: string }) {
       files: inspected.files,
       manifest: inspected.manifest,
     };
+    if (!inspected.native) {
+      const installed = await previews.materialize(candidate);
+      const dependencies =
+        JSON.parse(inspected.files["package.json"]).dependencies ?? {};
+      for (const name of referencedComponentPackages(inspected.files)) {
+        const version = dependencies[name];
+        if (typeof version !== "string")
+          throw new StudioError(
+            `${name}: imported React components need an exact direct dependency.`,
+          );
+        const admitted = await inspectLibrary(installed, name, version);
+        inspected.manifest.libraries.push({
+          name,
+          version,
+          components: admitted.components,
+        });
+      }
+      inspected.files = synchronizeRuntime(inspected.files, inspected.manifest);
+      candidate.files = inspected.files;
+      candidate.manifest = inspected.manifest;
+      candidate.id = digest([candidate.files, candidate.manifest]);
+    }
     await previews.verify(candidate, true);
     res.json(await store.create(inspected.manifest, inspected.files));
   });
@@ -876,9 +1282,13 @@ export async function createApp(options: { root: string; origin: string }) {
         message:
           "The template has different business scenarios. Create an adaptation draft, then review its proposed requirements and page changes together.",
       });
+    const manifest = {
+      ...template.manifest,
+      name: req.body.name || template.name,
+    };
     const created = await store.create(
-      { ...template.manifest, name: req.body.name || template.name },
-      template.files,
+      manifest,
+      synchronizeRuntime(template.files, manifest),
     );
     if (!same) {
       created.state.templateReconciliation = { requirements: files, scope };
@@ -912,9 +1322,9 @@ export async function createApp(options: { root: string; origin: string }) {
     app,
     store,
     previews,
-    close: () => {
-      previews.close();
+    close: async () => {
       ai.close();
+      await previews.close();
     },
   };
 }

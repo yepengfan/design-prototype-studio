@@ -59,3 +59,57 @@ it("emits only the selected project context into the intentional model prompt in
   expect(prompt).toContain("Change spacing");
   expect(prompt).not.toContain(process.cwd());
 });
+
+it("disconnecting the backend stops an owned tool and descendants that ignore termination", async () => {
+  const { RPC } = await import("../server/core/ai");
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "studio-owned-process-"),
+  );
+  const tool = `const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e','process.on("SIGTERM",()=>{});setInterval(()=>{},1000)'],{stdio:'ignore'});setTimeout(()=>console.log(JSON.stringify({method:'probe/ready',params:{pid:child.pid}})),150);setInterval(()=>{},1000);`;
+  const rpc = new RPC(process.execPath, ["-e", tool], root, false);
+  let descendant = 0;
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("Owned tool did not start")),
+        5000,
+      );
+      rpc.onEvent = (packet) => {
+        if (packet.method === "probe/ready") {
+          descendant = Number(packet.params?.pid);
+          clearTimeout(timer);
+          resolve();
+        }
+      };
+    });
+    expect(alive(descendant)).toBe(true);
+    rpc.child.disconnect(); // The same event occurs when the backend is killed.
+    await expect
+      .poll(() => alive(descendant), { timeout: 7000, interval: 100 })
+      .toBe(false);
+    expect(rpc.toolPid && alive(rpc.toolPid)).toBe(false);
+  } finally {
+    if (descendant && alive(descendant))
+      try {
+        process.kill(descendant, "SIGKILL");
+      } catch {
+        /* already stopped */
+      }
+    if (rpc.toolPid)
+      try {
+        process.kill(-rpc.toolPid, "SIGKILL");
+      } catch {
+        /* already stopped */
+      }
+    rpc.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}, 15000);

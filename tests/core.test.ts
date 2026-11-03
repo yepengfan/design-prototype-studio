@@ -209,6 +209,22 @@ describe("safe source handoff", () => {
     );
     expect(await fs.readdir(outside)).toEqual([]);
   });
+  it("bounds actual decompression even when an archive lies about expanded sizes and detects corrupt content", () => {
+    const zip = new AdmZip();
+    zip.addFile("src/large.txt", Buffer.alloc(4_100_000, 65));
+    const buffer = zip.toBuffer();
+    const local = buffer.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+    const central = buffer.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+    buffer.writeUInt32LE(1, local + 22);
+    buffer.writeUInt32LE(1, central + 24);
+    expect(() => readArchive(buffer)).toThrow(/size limit|checksum|size/);
+    const small = new AdmZip();
+    small.addFile("src/notice.txt", Buffer.from("Notice"));
+    const corrupt = small.toBuffer();
+    const header = corrupt.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+    corrupt.writeUInt32LE(0, header + 16);
+    expect(() => readArchive(corrupt)).toThrow("checksum");
+  });
   it("preserves legacy render, decorators, hooks and styles and reports missing requirements", () => {
     const files = {
       "package.json": '{"name":"legacy","dependencies":{"react":"19.3.1"}}',
@@ -383,6 +399,133 @@ describe("annotation result history", () => {
       ["accepted", "accepted"],
     );
     expect(restored.state.annotations[2].text).toBe("Try again");
+  });
+  it("restores an earlier acceptance when undoing the result that explicitly replaced it", async () => {
+    const { store, state, b } = await acceptedFixture(true);
+    const replacement = await store.persist(state.id, {
+      parent: b.parent,
+      label: "Replace A with B",
+      files: b.files,
+      manifest: b.manifest,
+      activeAnnotationResults: ["r-b"],
+    });
+    state.head = replacement.id;
+    state.runs[1].appliedRevision = replacement.id;
+    state.annotations[0].status = "pending";
+    await store.saveState(state);
+    const undone = await new Annotations(store, async () => {}).undo(
+      state.id,
+      "r-b",
+    );
+    expect(undone.snapshot.activeAnnotationResults).toEqual(["r-a"]);
+    expect(undone.state.annotations[0].status).toBe("accepted");
+    expect(undone.snapshot.files["src/a.css"]).toBe("a{color:green}");
+  });
+  it("identifies accepted work touched by a new rework even when it is already in the proposal base", async () => {
+    const { store, state, b } = await acceptedFixture();
+    const notes = new Annotations(store, async () => {});
+    const proposal: Proposal = {
+      kind: "presentation",
+      summary: "Rework A",
+      files: { "src/a.css": "a{color:red}" },
+      questions: [],
+      affectedScenarios: [],
+    };
+    const impact = await notes.impact(
+      state.id,
+      b,
+      state,
+      { ...b.files, ...proposal.files },
+      proposal,
+    );
+    expect(impact.affectedAcceptedResults.map((result) => result.id)).toEqual([
+      "r-a",
+    ]);
+    expect(impact.affectedAcceptedResults[0].text).toBe("A");
+    const independent = await notes.impact(
+      state.id,
+      b,
+      state,
+      { ...b.files, "src/new.css": "h1{color:green}" },
+      proposal,
+    );
+    expect(independent.affectedAcceptedResults).toEqual([]);
+    expect(independent.acceptedResultsConfirmation).not.toBe(
+      impact.acceptedResultsConfirmation,
+    );
+  });
+  it("retargets pending drafts, resolves unique untouched regions and refuses ambiguous matches", async () => {
+    const store = new ProjectStore(await temp());
+    const p = project();
+    const page = p.manifest.pages[0];
+    p.files[page.file] =
+      "export function Page(){return <main><h1>First</h1><aside>Other</aside></main>}";
+    const initial = await store.create(p.manifest, p.files);
+    const notes = new Annotations(store, async () => {});
+    const target = anchors(initial.snapshot.files[page.file]).find(
+      (node) => node.tag === "h1",
+    )!;
+    const drafted = await notes.draft(initial.state.id, {
+      page: page.id,
+      target: target.id,
+      text: "Make this clearer",
+    });
+    const note = drafted.annotations[0];
+    const shifted = await store.commit(
+      initial.state.id,
+      initial.snapshot.id,
+      {
+        ...p.files,
+        [page.file]: p.files[page.file].replace(
+          "<main>",
+          "<main><p>Introduction</p>",
+        ),
+      },
+      p.manifest,
+      "Insert independent introduction",
+    );
+    expect(
+      (await notes.target(initial.state.id, shifted.snapshot, note)).node?.text,
+    ).toBe("First");
+    const duplicated = await store.commit(
+      initial.state.id,
+      shifted.snapshot.id,
+      {
+        ...shifted.snapshot.files,
+        [page.file]: shifted.snapshot.files[page.file].replace(
+          "<h1>First</h1>",
+          "<h1>First</h1><h1>First</h1>",
+        ),
+      },
+      p.manifest,
+      "Repeat heading",
+    );
+    await expect(
+      notes.target(initial.state.id, duplicated.snapshot, note),
+    ).rejects.toThrow("more than one");
+    const chosen = anchors(duplicated.snapshot.files[page.file]).find(
+      (node) => node.tag === "aside",
+    )!;
+    const revised = await notes.revise(initial.state.id, note.id, {
+      base: duplicated.snapshot.id,
+      page: page.id,
+      target: chosen.id,
+      text: "Change help text",
+    });
+    expect(revised.annotations[0]).toMatchObject({
+      text: "Change help text",
+      target: chosen.id,
+      base: duplicated.snapshot.id,
+      status: "draft",
+    });
+    await notes.approve(initial.state.id, [note.id]);
+    const second = await notes.revise(initial.state.id, note.id, {
+      base: duplicated.snapshot.id,
+      page: page.id,
+      target: chosen.id,
+      text: "Reconsider help",
+    });
+    expect(second.annotations[0].status).toBe("draft");
   });
   it("requires a choice for dependent results and preserves unrelated ordinary edits", async () => {
     const { store, state, b } = await acceptedFixture(true);

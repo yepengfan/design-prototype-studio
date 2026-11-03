@@ -18,8 +18,9 @@ function close() {
   if (closing) return;
   closing = true;
   stopChild(child);
-  const timer = setTimeout(() => process.exit(1), 4500);
-  timer.unref();
+  // Stay alive long enough to escalate the separately owned tool group even
+  // when its immediate parent exits before a stubborn descendant.
+  setTimeout(() => process.exit(Number(process.exitCode ?? 0)), 4500);
 }
 process.stdin.pipe(child.stdin);
 child.stdout.pipe(process.stdout);
@@ -35,6 +36,9 @@ child.once("error", () => {
   process.exitCode = 1;
   close();
 });
-child.once("exit", (code) => process.exit(closing ? 0 : (code ?? 1)));
+child.once("exit", (code) => {
+  if (!closing) process.exitCode = code ?? 1;
+  close();
+});
 if (child.pid && process.send)
   process.send({ type: "studio:tool-pid", pid: child.pid });

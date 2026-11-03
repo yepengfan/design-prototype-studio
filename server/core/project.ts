@@ -44,7 +44,10 @@ export function blankProject(name: string): {
       "utf8",
     ),
     "playwright.config.ts": `import { defineConfig } from "@playwright/test";
-export default defineConfig({ testDir: "./tests", use: { baseURL: "http://127.0.0.1:6006", viewport: { width: 1440, height: 1000 } }, webServer: { command: "npm run storybook -- --ci", url: "http://127.0.0.1:6006", reuseExistingServer: !process.env.CI }, workers: 1 });
+const port = Number(process.env.STUDIO_STORYBOOK_PORT ?? 6006);
+if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("Choose a local Storybook port between 1024 and 65535");
+const url = "http://127.0.0.1:" + port;
+export default defineConfig({ testDir: "./tests", use: { baseURL: url, viewport: { width: 1440, height: 1000 }, launchOptions: process.env.STUDIO_CHROME ? { executablePath: process.env.STUDIO_CHROME } : {} }, webServer: { command: "npm exec -- storybook dev --port " + port + " --host 127.0.0.1 --no-open --ci", url, reuseExistingServer: false }, workers: 1 });
 `,
     "src/data/adapter.ts": readFileSync(
       new URL("../templates/adapter.ts", import.meta.url),
@@ -119,6 +122,7 @@ export function synchronizeRuntime(input: Files, manifest: Manifest): Files {
       ? ".storybook/preview.ts"
       : undefined;
   const managedPreview =
+    manifest.sourceOrigin !== "legacy" &&
     files[".storybook/preview.tsx"]?.startsWith("// Studio preview");
   if (preview && !managedPreview)
     for (const style of manifest.styles) {
@@ -138,7 +142,8 @@ export function synchronizeRuntime(input: Files, manifest: Manifest): Files {
   // Native projects own their generated launcher. Legacy launchers/configuration stay intact.
   if (
     !files["src/main.tsx"] ||
-    files["src/main.tsx"].startsWith("// Studio launcher")
+    (manifest.sourceOrigin !== "legacy" &&
+      files["src/main.tsx"].startsWith("// Studio launcher"))
   ) {
     const page = manifest.pages[0];
     const provider = providerSetup(manifest.provider, "../");

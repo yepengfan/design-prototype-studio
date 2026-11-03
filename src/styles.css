@@ -1063,3 +1063,22 @@ h3 {
   font-size: 11px;
   margin: 6px 0;
 }
+
+.property-group {
+  border: 1px solid #dce5d4;
+  border-radius: 6px;
+  padding: 12px;
+  margin: 14px 0;
+}
+.property-group legend {
+  font-size: 12px;
+  font-weight: 600;
+}
+.property-group .property {
+  margin-bottom: 12px;
+}
+.annotation-result {
+  border-left: 2px solid #c9d9c0;
+  padding: 8px 0 8px 10px;
+  margin-top: 12px;
+}

@@ -31,8 +31,8 @@ const server = createServer(studio.app);
 server.listen(port, "127.0.0.1", () =>
   console.log(`Studio is ready at ${origin}`),
 );
-const close = () => {
-  studio.close();
+const close = async () => {
+  await studio.close();
   server.close(() => process.exit());
 };
 process.on("SIGTERM", close);

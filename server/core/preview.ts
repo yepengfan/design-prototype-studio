@@ -12,7 +12,7 @@ import {
   type Component,
 } from "./contracts.js";
 import { chromium } from "@playwright/test";
-import { installProject } from "./libraries.js";
+import { DependencyCache } from "./dependencies.js";
 import { stopChild, runCommand } from "./process.js";
 import { componentReference } from "./component-reference.js";
 import { providerSetup, projectSpecifier } from "./providers.js";
@@ -27,25 +27,84 @@ export type Preview = {
 };
 export class Previews {
   private previews = new Map<string, Preview>();
+  private controller = new AbortController();
+  private pending = new Set<Promise<unknown>>();
+  private starting = new Set<ChildProcess>();
+  private dependencies: DependencyCache;
+  private ensureOpen() {
+    if (this.controller.signal.aborted)
+      throw new StudioError(
+        "Studio is closing. Reopen it before starting another preview.",
+        409,
+      );
+  }
+  private track<T>(job: Promise<T>) {
+    this.pending.add(job);
+    void job.finally(() => this.pending.delete(job)).catch(() => {});
+    return job;
+  }
+  private command(...args: Parameters<typeof runCommand>) {
+    const [command, argv, cwd, options] = args;
+    return runCommand(command, argv, cwd, {
+      ...options,
+      signal: this.controller.signal,
+    });
+  }
+  async materialize(...args: Parameters<Previews["materializeInternal"]>) {
+    this.ensureOpen();
+    return this.track(this.materializeInternal(...args));
+  }
+  async verify(...args: Parameters<Previews["verifyInternal"]>) {
+    this.ensureOpen();
+    return this.track(this.verifyInternal(...args));
+  }
+  async start(...args: Parameters<Previews["startInternal"]>) {
+    this.ensureOpen();
+    return this.track(this.startInternal(...args));
+  }
+  async verifyComponents(
+    ...args: Parameters<Previews["verifyComponentsInternal"]>
+  ) {
+    this.ensureOpen();
+    return this.track(this.verifyComponentsInternal(...args));
+  }
+  async startStorybook(
+    ...args: Parameters<Previews["startStorybookInternal"]>
+  ) {
+    this.ensureOpen();
+    return this.track(this.startStorybookInternal(...args));
+  }
   private storybooks = new Map<string, Server>();
   constructor(
     readonly root: string,
     readonly origin: string,
-  ) {}
-  async materialize(snapshot: Snapshot, key = snapshot.id) {
+  ) {
+    this.dependencies = new DependencyCache(
+      path.join(root, "dependencies"),
+      this.controller.signal,
+    );
+  }
+  private async materializeInternal(
+    snapshot: Snapshot,
+    key = snapshot.id,
+  ): Promise<string> {
     await fs.mkdir(path.join(this.root, key), { recursive: true });
     const root = await fs.realpath(path.join(this.root, key));
     const marker = path.join(root, ".installed");
     if ((await fs.readFile(marker, "utf8").catch(() => "")) === snapshot.id)
       return root;
     await fs.mkdir(root, { recursive: true });
-    await installProject(root, snapshot.files, snapshot.manifest.libraries);
+    await this.dependencies.materialize(root, snapshot);
+    this.ensureOpen();
     await fs.writeFile(marker, snapshot.id);
     return root;
   }
-  async verify(snapshot: Snapshot, build = false) {
+  private async verifyInternal(
+    snapshot: Snapshot,
+    build = false,
+  ): Promise<void> {
     const root = await this.materialize(snapshot);
-    const result = await runCommand(
+    const result = await this.command(
       path.join(root, "node_modules", ".bin", "tsc"),
       ["--noEmit"],
       root,
@@ -57,14 +116,14 @@ export class Previews {
         result.stdout.slice(0, 12000),
       );
     if (build) {
-      const built = await runCommand("npm", ["run", "build"], root);
+      const built = await this.command("npm", ["run", "build"], root);
       if (built.code)
         throw new StudioError(
           "React build failed. The project is not deliverable.",
           422,
           built.stdout.slice(0, 12000),
         );
-      const stories = await runCommand(
+      const stories = await this.command(
         "npm",
         ["run", "build-storybook", "--", "--quiet"],
         root,
@@ -78,7 +137,7 @@ export class Previews {
         );
     }
   }
-  async start(
+  private async startInternal(
     snapshot: Snapshot,
     scenario?: string,
     componentPreview?: {
@@ -88,6 +147,7 @@ export class Previews {
       children?: string;
       styles: string[];
       provider?: string;
+      story?: { file: string; export: string; annotations?: string };
     },
     pageId?: string,
     gallery?: Component[],
@@ -95,10 +155,19 @@ export class Previews {
     const id = randomUUID();
     const root = await this.materialize(snapshot, id);
     let launcher: string;
+    let composed = false;
     let galleryFile: { path: string; source: string } | undefined;
     if (gallery) {
       const imports: string[] = [];
       const examples: string[] = [];
+      if (
+        gallery.some((component) =>
+          component.examples.some((example) => example.story),
+        )
+      )
+        imports.push(
+          "import {composeStories as composeLibraryStories,setProjectAnnotations as setLibraryAnnotations} from '@storybook/react-vite';",
+        );
       gallery.forEach((component, i) => {
         const reference = componentReference(component.export);
         imports.push(
@@ -115,11 +184,33 @@ export class Previews {
           `Provider${i}`,
         );
         imports.push(provider.imports);
-        component.examples.forEach((example, j) =>
+        component.examples.forEach((example, j) => {
+          let content = `<C${i} {...${JSON.stringify(example.props)}}>${component.children ? `{${JSON.stringify(example.children ?? "")}}` : ""}</C${i}>`;
+          if (example.story) {
+            const module =
+              "../node_modules/" +
+              component.package +
+              "/" +
+              example.story.file.replace(/\.[tj]sx?$/, "");
+            imports.push(
+              `import * as StateModule${i}_${j} from ${JSON.stringify(module)};`,
+            );
+            let annotations = "{}";
+            if (example.story.annotations) {
+              imports.push(
+                `import * as StateAnnotations${i}_${j} from ${JSON.stringify("../node_modules/" + component.package + "/" + example.story.annotations.replace(/\.[tj]sx?$/, ""))};`,
+              );
+              annotations = `StateAnnotations${i}_${j}`;
+            }
+            imports.push(
+              `setLibraryAnnotations(${annotations});const State${i}_${j}=composeLibraryStories(StateModule${i}_${j})[${JSON.stringify(example.story.export)}];`,
+            );
+            content = `<State${i}_${j} />`;
+          }
           examples.push(
-            `<section aria-label=${JSON.stringify(component.package + "/" + component.name + "/" + example.name)} key=${JSON.stringify(i + "-" + j)}><h2>{${JSON.stringify(component.name + " · " + example.name)}}</h2>${provider.wrap(`<C${i} {...${JSON.stringify(example.props)}}>${component.children ? `{${JSON.stringify(example.children ?? "")}}` : ""}</C${i}>`)}</section>`,
-          ),
-        );
+            `<section aria-label=${JSON.stringify(component.package + "/" + component.name + "/" + example.name)} key=${JSON.stringify(i + "-" + j)}><h2>{${JSON.stringify(component.name + " · " + example.name)}}</h2>${provider.wrap(content)}</section>`,
+          );
+        });
       });
       galleryFile = {
         path: `src/studio-gallery-${id}.tsx`,
@@ -128,34 +219,53 @@ export class Previews {
       launcher = `import Page from ${JSON.stringify("./" + galleryFile.path)};`;
     } else if (componentPreview) {
       const reference = componentReference(componentPreview.export);
-      launcher = `import { ${reference.root} as RootExample } from ${JSON.stringify(componentPreview.package)};\nconst Example = RootExample${reference.suffix};\n${componentPreview.styles.map((s) => `import ${JSON.stringify(projectSpecifier(s, "./"))};`).join("\n")}\nconst Page = () => <Example {...${JSON.stringify(componentPreview.props)}}>{${JSON.stringify(componentPreview.children ?? "")}}</Example>;\n`;
+      if (componentPreview.story) {
+        const story = componentPreview.story;
+        launcher = `import {composeStories,setProjectAnnotations} from '@storybook/react-vite';
+import * as states from ${JSON.stringify("./node_modules/" + componentPreview.package + "/" + story.file.replace(/\.[tj]sx?$/, ""))};
+${story.annotations ? `import * as annotations from ${JSON.stringify("./node_modules/" + componentPreview.package + "/" + story.annotations.replace(/\.[tj]sx?$/, ""))};setProjectAnnotations(annotations);` : "setProjectAnnotations({});"}
+const Page=composeStories(states)[${JSON.stringify(story.export)}];`;
+      } else {
+        launcher = `import { ${reference.root} as RootExample } from ${JSON.stringify(componentPreview.package)};\nconst Example = RootExample${reference.suffix};\n${componentPreview.styles.map((s) => `import ${JSON.stringify(projectSpecifier(s, "./"))};`).join("\n")}\nconst Page = () => <Example {...${JSON.stringify(componentPreview.props)}}>{${JSON.stringify(componentPreview.children ?? "")}}</Example>;\n`;
+      }
     } else {
       const binding = snapshot.manifest.scenarios.find(
         (s) => s.scenario === scenario,
       );
-      if (binding) {
-        const [file, story] = binding.story.split("#");
+      if (scenario && !binding)
+        throw new StudioError(
+          "This scenario needs its mapped story and initial state before previewing.",
+        );
+      const page =
+        snapshot.manifest.pages.find((page) => page.id === pageId) ??
+        snapshot.manifest.pages[0];
+      const chosenStory = binding?.story ?? page?.previewStory;
+      if (chosenStory) {
+        composed = true;
+        const [file, story] = chosenStory.split("#");
         if (!snapshot.files[file] || !story)
           throw new StudioError(
-            "This scenario needs its matching Storybook story before preview.",
+            "This preview needs its matching original Storybook story.",
           );
-        const previewConfig = snapshot.files[".storybook/preview.tsx"]
-          ? "../.storybook/preview"
-          : snapshot.files[".storybook/preview.ts"]
-            ? "../.storybook/preview"
-            : undefined;
-        launcher = `import { composeStories, setProjectAnnotations } from '@storybook/react-vite';\nimport * as stories from ${JSON.stringify("../" + file.replace(/\.tsx?$/, ""))};\n${previewConfig ? `import * as annotations from ${JSON.stringify(previewConfig)}; setProjectAnnotations(annotations);` : ""}\nconst Page = composeStories(stories)[${JSON.stringify(story)}];\n`;
+        const previewConfig = [
+          ".storybook/preview.tsx",
+          ".storybook/preview.ts",
+          ".storybook/preview.jsx",
+          ".storybook/preview.js",
+        ].find((file) => snapshot.files[file]);
+        launcher = `import { composeStories, setProjectAnnotations } from '@storybook/react-vite';
+import * as stories from ${JSON.stringify("./" + file.replace(/\.[tj]sx?$/, ""))};
+${previewConfig ? `import * as annotations from ${JSON.stringify("./" + previewConfig.replace(/\.[tj]sx?$/, ""))}; setProjectAnnotations(annotations);` : ""}
+const Page = composeStories(stories)[${JSON.stringify(story)}];
+`;
       } else {
-        const page =
-          snapshot.manifest.pages.find((p) => p.id === pageId) ??
-          snapshot.manifest.pages[0];
         if (!page) throw new StudioError("Create a page before previewing.");
-        launcher = `import { ${page.export === "default" ? "default" : page.export} as Page } from ${JSON.stringify("../" + page.file.replace(/\.tsx?$/, ""))};\n`;
+        launcher = `import { ${page.export === "default" ? "default" : page.export} as Page } from ${JSON.stringify("./" + page.file.replace(/\.[tj]sx?$/, ""))};\n`;
       }
     }
     const provider = providerSetup(
       componentPreview?.provider ??
-        (scenario ? undefined : snapshot.manifest.provider),
+        (composed ? undefined : snapshot.manifest.provider),
       "./",
     );
     const files: Files = {
@@ -170,7 +280,7 @@ export class Previews {
       .replaceAll('"../.storybook/', '"./.storybook/');
     await writeFiles(root, files);
     if (galleryFile) {
-      const checked = await runCommand(
+      const checked = await this.command(
         path.join(root, "node_modules", ".bin", "tsc"),
         ["--noEmit"],
         root,
@@ -185,9 +295,13 @@ export class Previews {
     const worker = fileURLToPath(
       new URL("../preview-worker.ts", import.meta.url),
     );
+    const dependencyRoot = path.dirname(
+      await fs.realpath(path.join(root, "node_modules/.bin")),
+    );
+    this.ensureOpen();
     const child = spawn(
       process.execPath,
-      ["--import", "tsx", worker, root, this.origin],
+      ["--import", "tsx", worker, root, this.origin, dependencyRoot],
       {
         cwd: fileURLToPath(new URL("../..", import.meta.url)),
         detached: true,
@@ -195,6 +309,8 @@ export class Previews {
         stdio: ["ignore", "pipe", "pipe", "ipc"],
       },
     );
+    this.starting.add(child);
+    child.once("exit", () => this.starting.delete(child));
     const url = await new Promise<string>((resolve, reject) => {
       let output = "";
       const timer = setTimeout(() => {
@@ -241,10 +357,15 @@ export class Previews {
       child,
       revision: snapshot.id,
     };
+    this.ensureOpen();
     this.previews.set(id, preview);
+    this.starting.delete(child);
     return { id, url: preview.url, revision: preview.revision };
   }
-  async verifyComponents(snapshot: Snapshot, components: Component[]) {
+  private async verifyComponentsInternal(
+    snapshot: Snapshot,
+    components: Component[],
+  ) {
     const preview = await this.start(
       snapshot,
       undefined,
@@ -252,42 +373,66 @@ export class Previews {
       undefined,
       components,
     );
-    const browser = await chromium.launch({
-      headless: true,
-      executablePath: process.env.STUDIO_CHROME,
-    });
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
     const errors: string[] = [];
+    let failRuntime!: (error: Error) => void;
+    const runtimeFailure = new Promise<never>((_resolve, reject) => {
+      failRuntime = reject;
+    });
+    void runtimeFailure.catch(() => {});
+    const reportRuntime = (message: string) => {
+      errors.push(message);
+      failRuntime(new Error("Published example failed in the browser"));
+    };
     try {
+      browser = await chromium.launch({
+        headless: true,
+        executablePath: process.env.STUDIO_CHROME,
+      });
       const page = await browser.newPage();
-      page.on("pageerror", (error) => errors.push(error.message));
+      page.on("pageerror", (error) => reportRuntime(error.message));
       page.on("console", (message) => {
-        if (message.type() === "error") errors.push(message.text());
+        if (message.type() === "error") reportRuntime(message.text());
       });
       await page.goto(preview.url);
       for (const component of components)
         for (const example of component.examples)
-          await page
-            .getByRole("region", {
-              name:
-                component.package + "/" + component.name + "/" + example.name,
-              exact: true,
-            })
-            .waitFor();
+          await Promise.race([
+            runtimeFailure,
+            page
+              .getByRole("region", {
+                name:
+                  component.package + "/" + component.name + "/" + example.name,
+                exact: true,
+              })
+              .waitFor({ timeout: 15000 }),
+          ]);
+      if (errors.length) throw new Error("Published example failed");
+      return preview;
+    } catch (error) {
+      this.stop(preview.id);
       if (errors.length)
         throw new StudioError(
           "Published component previews reported runtime errors. Ask the maintainer to fix the affected exports, providers or styles.",
           422,
           errors,
         );
-      return preview;
-    } catch (error) {
-      this.stop(preview.id);
-      throw error;
+      if (!browser)
+        throw new StudioError(
+          "The preview browser could not start. Install Chromium with npx playwright install chromium, then retry this library preview.",
+          503,
+        );
+      throw new StudioError(
+        "Published common-state examples could not render. Ask the maintainer to check this release's exports, required setup and examples.",
+        422,
+        error instanceof StudioError ? error.message : undefined,
+      );
     } finally {
-      await browser.close();
+      await browser?.close();
     }
   }
-  async startStorybook(snapshot: Snapshot) {
+
+  private async startStorybookInternal(snapshot: Snapshot) {
     const root = await this.materialize(snapshot);
     const output = path.join(root, "storybook-static");
     const index = JSON.parse(
@@ -327,8 +472,26 @@ export class Previews {
       this.previews.delete(id);
     }
   }
-  close() {
+  async close() {
+    this.controller.abort();
+    const children = new Set([
+      ...this.starting,
+      ...[...this.previews.values()].map((preview) => preview.child),
+    ]);
+    const stopped = [...children].map(
+      (child) =>
+        new Promise<void>((resolve) => {
+          if (child.exitCode !== null || child.signalCode !== null) {
+            resolve();
+            return;
+          }
+          child.once("exit", () => resolve());
+          child.once("error", () => resolve());
+          stopChild(child);
+        }),
+    );
     for (const id of this.previews.keys()) this.stop(id);
     for (const id of this.storybooks.keys()) this.stop(id);
+    await Promise.allSettled([...this.pending, ...stopped]);
   }
 }

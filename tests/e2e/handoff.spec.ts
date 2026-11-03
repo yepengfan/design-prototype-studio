@@ -1,3 +1,4 @@
+import { accountFreeAI } from "../account-free-ai";
 import { test, expect } from "@playwright/test";
 import { createServer } from "node:http";
 import { promises as fs } from "node:fs";
@@ -24,7 +25,11 @@ test("fresh source handoff preserves controllers, providers, styles and all scen
   if (!address || typeof address === "string")
     throw new Error("HTTP fixture did not bind");
   const origin = `http://127.0.0.1:${address.port}`;
-  const studio = await createApp({ root: path.join(root, "studio"), origin });
+  const studio = await createApp({
+    ai: accountFreeAI,
+    root: path.join(root, "studio"),
+    origin,
+  });
   server.on("request", studio.app);
   const session = await (await fetch(origin + "/api/session")).json();
   const request = async (url: string, body?: unknown) => {
@@ -129,6 +134,28 @@ test("fresh source handoff preserves controllers, providers, styles and all scen
     await installProject(fresh, exported, prototype.manifest.libraries);
     const built = await runCommand("npm", ["run", "build"], fresh);
     expect(built.code, built.stdout + built.stderr).toBe(0);
+    const portProbe = createServer();
+    await new Promise<void>((resolve) =>
+      portProbe.listen(0, "127.0.0.1", resolve),
+    );
+    const scenarioAddress = portProbe.address();
+    if (!scenarioAddress || typeof scenarioAddress === "string")
+      throw new Error("Scenario port did not bind");
+    await new Promise<void>((resolve) => portProbe.close(() => resolve()));
+    const scenarios = await runCommand(
+      "npm",
+      ["run", "test:scenarios"],
+      fresh,
+      {
+        env: {
+          STUDIO_STORYBOOK_PORT: String(scenarioAddress.port),
+          STUDIO_CHROME: process.env.STUDIO_CHROME,
+          CI: "1",
+        },
+        timeout: 120_000,
+      },
+    );
+    expect(scenarios.code, scenarios.stdout + scenarios.stderr).toBe(0);
     const again = await request("/import", {
       archive: exportArchive(
         exported,
@@ -140,7 +167,7 @@ test("fresh source handoff preserves controllers, providers, styles and all scen
       exported["src/pages/Page.tsx"],
     );
   } finally {
-    studio.close();
+    await studio.close();
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await registry.close();

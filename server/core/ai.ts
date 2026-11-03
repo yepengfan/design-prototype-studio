@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import os from "node:os";
 import { runCommand } from "./process.js";
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
 import {
   proposalSchema,
   StudioError,
@@ -34,7 +35,89 @@ type Packet = {
   result?: any;
   error?: { message: string; data?: { message?: string } };
 }; // Protocol is validated at each method boundary.
+const protocolMethods = new Set([
+  "initialize",
+  "initialized",
+  "config/read",
+  "thread/start",
+  "turn/start",
+  "turn/interrupt",
+  "turn/completed",
+  "item/agentMessage/delta",
+  "error",
+  "session/new",
+  "session/set_mode",
+  "session/prompt",
+  "session/cancel",
+  "session/update",
+  "session/request_permission",
+  "fs/read_text_file",
+  "fs/write_text_file",
+  "terminal/create",
+  "terminal/output",
+  "terminal/release",
+  "terminal/wait_for_exit",
+  "terminal/kill",
+]);
+const updateKinds = new Set([
+  "agent_message_chunk",
+  "agent_thought_chunk",
+  "tool_call",
+  "tool_call_update",
+  "plan",
+  "available_commands_update",
+  "current_mode_update",
+  "config_option_update",
+  "user_message_chunk",
+]);
 export class RPC {
+  readonly protocol = {
+    invocation: randomUUID(),
+    started: Date.now(),
+    completed: undefined as number | undefined,
+    outcome: undefined as string | undefined,
+    lastEvent: undefined as
+      | {
+          ms: number;
+          direction: string;
+          kind: string;
+          method: string;
+          update?: string;
+        }
+      | undefined,
+    events: [] as {
+      ms: number;
+      direction: string;
+      kind: string;
+      method: string;
+      update?: string;
+    }[],
+    counts: {} as Record<string, number>,
+    pendingAtFailure: [] as string[],
+  };
+  private trace(
+    direction: string,
+    kind: string,
+    method: string,
+    update?: unknown,
+  ) {
+    const name = protocolMethods.has(method) ? method : "unrecognized";
+    const subtype =
+      typeof update === "string" && updateKinds.has(update)
+        ? update
+        : undefined;
+    const key = [direction, kind, name, subtype ?? ""].join(":");
+    this.protocol.counts[key] = (this.protocol.counts[key] ?? 0) + 1;
+    const event = {
+      ms: Date.now() - this.protocol.started,
+      direction,
+      kind,
+      method: name,
+      update: subtype,
+    };
+    this.protocol.lastEvent = event;
+    if (this.protocol.events.length < 1000) this.protocol.events.push(event);
+  }
   private next = 1;
   private pending = new Map<
     number,
@@ -119,6 +202,7 @@ export class RPC {
         const entry = this.pending.get(Number(p.id));
         if (!entry) return;
         this.pending.delete(Number(p.id));
+        this.trace("in", p.error ? "error-response" : "response", entry.method);
         if (p.error)
           entry.reject(
             new StudioError(
@@ -127,6 +211,8 @@ export class RPC {
           );
         else entry.resolve(p.result);
       } else if (p.id !== undefined && p.method) {
+        this.trace("in", "client-request", p.method);
+        this.trace("out", "denied-client-request", p.method);
         // No browser or model-controlled filesystem, shell, MCP or permission proxy.
         if (p.method === "session/request_permission")
           this.send({
@@ -144,7 +230,15 @@ export class RPC {
                 "Studio accepts structured proposals only. Client tools are disabled.",
             },
           });
-      } else this.onEvent(p);
+      } else {
+        this.trace(
+          "in",
+          "notification",
+          p.method ?? "",
+          p.params?.update?.sessionUpdate,
+        );
+        this.onEvent(p);
+      }
     });
     const diagnostics = new Set<string>();
     this.child.stderr.on("data", (chunk) => {
@@ -189,6 +283,11 @@ export class RPC {
     );
   }
   private fail(e: Error) {
+    if (this.pending.size)
+      this.protocol.pendingAtFailure = [...this.pending.values()].map(
+        (entry) =>
+          protocolMethods.has(entry.method) ? entry.method : "unrecognized",
+      );
     for (const p of this.pending.values()) p.reject(e);
     this.pending.clear();
   }
@@ -197,9 +296,11 @@ export class RPC {
       this.child.stdin.write(JSON.stringify(p) + "\n");
   }
   notify(method: string, params: unknown = {}) {
+    this.trace("out", "notification", method);
     this.send({ jsonrpc: "2.0", method, params });
   }
   call(method: string, params: unknown = {}): Promise<any> {
+    this.trace("out", "request", method);
     const id = this.next++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject, method });
@@ -208,14 +309,17 @@ export class RPC {
   }
   close() {
     this.fail(new StudioError("AI connection closed."));
-    stopChild(this.child);
+    stopChild(this.child, 6000);
   }
 }
 export function generationPrompt(snapshot: Snapshot, request: string) {
+  const scope = parseRequirements(snapshot.files, snapshot.manifest.scope);
+  const selectedRequirements = new Set(scope.files.map((file) => file.file));
   const source = Object.fromEntries(
     Object.entries(snapshot.files).filter(
       ([name, content]) =>
         name !== "package-lock.json" &&
+        (!name.endsWith(".feature") || selectedRequirements.has(name)) &&
         !content.startsWith("studio-binary:v1:"),
     ),
   );
@@ -226,7 +330,7 @@ export function generationPrompt(snapshot: Snapshot, request: string) {
       hash: digest(content),
       bytes: Buffer.byteLength(content),
     }));
-  return `You are editing a reusable React frontend project for a designer. Return exactly one JSON object matching this schema, with only complete changed/new files in files, explicit removed paths in deleted, and no markdown fences. Omitted files remain unchanged. Use manifestChanges for page/scenario/style/provider changes; do not repeat or alter library metadata or dependency manifests: ${JSON.stringify(z.toJSONSchema(proposalSchema))}\nDo not use tools, commands, file reads, MCP, hooks, delegation or extensions. All context is supplied below. Never invent replacement interactive controls: use genuine admitted library exports. If capabilities, published information or business facts are missing, return kind gap or clarification and questions, with files empty and no deletions. Preserve untouched source, controllers, styling, dependencies and independent scenarios. Never connect independent features without a requirement. Implement all selected Gherkin scenarios with complete initial fixtures, typed replaceable query/operation adapters, validation, interactions, Storybook stories and explicit step bindings. Change business behavior only with a proposed matching .feature difference; presentation-only changes leave Gherkin intact. Unknown business facts require questions before implementing affected behavior. No machine paths, credentials, lifecycle scripts or configuration for agents.\nSelected requirements: ${JSON.stringify(parseRequirements(snapshot.files, snapshot.manifest.scope))}\nAdmitted libraries and manifest: ${JSON.stringify(snapshot.manifest)}\nCurrent editable source: ${JSON.stringify(source)}\nUnchanged binary/locked artifact inventory: ${JSON.stringify(inventory)}\nDesigner request: ${request}`;
+  return `You are editing a reusable React frontend project for a designer. Return exactly one JSON object matching this schema, with only complete changed/new files in files, explicit removed paths in deleted, and no markdown fences. Omitted files remain unchanged. Use manifestChanges for page/scenario/style/provider changes; do not repeat or alter library metadata or dependency manifests: ${JSON.stringify(z.toJSONSchema(proposalSchema))}\nDo not use tools, commands, file reads, MCP, hooks, delegation or extensions. All context is supplied below. Never invent replacement interactive controls: use genuine admitted library exports. If capabilities, published information or business facts are missing, return kind gap or clarification and questions, with files empty and no deletions. Preserve untouched source, controllers, styling, dependencies and independent scenarios. Never connect independent features without a requirement. Implement all selected Gherkin scenarios with complete initial fixtures, typed replaceable query/operation adapters, validation, interactions, Storybook stories and explicit step bindings. Change business behavior only with a proposed matching .feature difference; presentation-only changes leave Gherkin intact. Unknown business facts require questions before implementing affected behavior. No machine paths, credentials, lifecycle scripts or configuration for agents.\nSelected requirements: ${JSON.stringify(scope)}\nAdmitted libraries and manifest: ${JSON.stringify(snapshot.manifest)}\nCurrent editable source: ${JSON.stringify(source)}\nUnchanged binary/locked artifact inventory: ${JSON.stringify(inventory)}\nDesigner request: ${request}`;
 }
 export class LocalAI {
   private active = new Map<string, { rpc: RPC; cancel: () => Promise<void> }>();
@@ -234,6 +338,11 @@ export class LocalAI {
     readonly root: string,
     private diagnostic?: (pid: number, paths?: string[]) => void,
   ) {}
+  // Allows protocol fixtures to hold a historical input contract constant.
+  // No browser or project file can replace this formatter.
+  protected formatPrompt(snapshot: Snapshot, request: string) {
+    return generationPrompt(snapshot, request);
+  }
   async generate(
     run: Run,
     snapshot: Snapshot,
@@ -363,12 +472,38 @@ export class LocalAI {
         new StudioError("The AI process exited before completing a proposal."),
       ),
     );
+    let timedOut = false;
     const timer = setTimeout(() => {
+      timedOut = true;
       fail(
         new StudioError("The AI request timed out. Retry from accepted work."),
       );
       rpc.close();
-    }, 300_000);
+    }, 600_000);
+    let pendingText = "";
+    let progressTimer: ReturnType<typeof setTimeout> | undefined;
+    let progressWrites = Promise.resolve();
+    const flushProgress = () => {
+      clearTimeout(progressTimer);
+      progressTimer = undefined;
+      if (pendingText) {
+        const text = pendingText;
+        pendingText = "";
+        progressWrites = progressWrites.then(() => update(text));
+        void progressWrites.catch((error) => {
+          fail(error);
+          rpc.close();
+        });
+      }
+      return progressWrites;
+    };
+    const progress = (text: string) => {
+      pendingText += text;
+      // Streaming can produce thousands of tiny deltas. Persist batches while
+      // retaining task state independently of a browser connection.
+      progressTimer ??= setTimeout(() => void flushProgress(), 100);
+    };
+    const activity = new Set<string>();
     rpc.onEvent = (p) => {
       if (p.method === "error")
         failureCode = JSON.stringify(p.params?.error ?? "")
@@ -379,16 +514,29 @@ export class LocalAI {
           .slice(0, 500);
       if (isCodex && p.method === "item/agentMessage/delta") {
         output += p.params?.delta ?? "";
-        void update(String(p.params?.delta ?? ""));
+        progress(String(p.params?.delta ?? ""));
       }
       if (!isCodex && p.method === "session/update") {
         const u = p.params?.update;
+        if (
+          ["agent_thought_chunk", "tool_call", "plan"].includes(
+            u?.sessionUpdate,
+          ) &&
+          !activity.has(u.sessionUpdate)
+        ) {
+          activity.add(u.sessionUpdate);
+          progress(
+            u.sessionUpdate === "tool_call"
+              ? "The tool is requesting workspace inspection; Studio permits structured proposals only."
+              : "The tool is planning the proposal.",
+          );
+        }
         if (
           u?.sessionUpdate === "agent_message_chunk" &&
           u.content?.type === "text"
         ) {
           output += u.content.text;
-          void update(u.content.text);
+          progress(u.content.text);
         }
       }
       if (p.method === "turn/completed") {
@@ -411,15 +559,15 @@ export class LocalAI {
       rpc,
       cancel: async () => {
         cancelled = true;
+        setTimeout(() => rpc.close(), 1500).unref();
+        fail(new StudioError("Cancelled. Partial output is quarantined."));
         if (session) {
           if (isCodex && turn)
-            await rpc
+            void rpc
               .call("turn/interrupt", { threadId: session, turnId: turn })
               .catch(() => {});
           else rpc.notify("session/cancel", { sessionId: session });
         }
-        setTimeout(() => rpc.close(), 1500).unref();
-        fail(new StudioError("Cancelled. Partial output is quarantined."));
       },
     });
     try {
@@ -450,7 +598,7 @@ export class LocalAI {
           threadId: session,
           effort: "medium",
           input: [
-            { type: "text", text: generationPrompt(snapshot, run.prompt) },
+            { type: "text", text: this.formatPrompt(snapshot, run.prompt) },
           ],
         });
         turn = result.turn.id;
@@ -483,21 +631,46 @@ export class LocalAI {
         const result = await rpc.call("session/prompt", {
           sessionId: session,
           prompt: [
-            { type: "text", text: generationPrompt(snapshot, run.prompt) },
+            { type: "text", text: this.formatPrompt(snapshot, run.prompt) },
           ],
         });
         if (result.stopReason !== "end_turn")
           throw new StudioError("Cursor did not complete the proposal.");
       }
+      await flushProgress();
       if (cancelled) throw new StudioError("Cancelled.");
       const json = output
         .trim()
         .replace(/^```(?:json)?\s*/, "")
         .replace(/\s*```$/, "");
-      return proposalSchema.parse(JSON.parse(json));
+      const proposal = proposalSchema.parse(JSON.parse(json));
+      rpc.protocol.outcome = "success";
+      return proposal;
+    } catch (error) {
+      rpc.protocol.outcome = timedOut
+        ? "timed-out"
+        : cancelled
+          ? "cancelled"
+          : "failed";
+      if (timedOut)
+        throw new StudioError(
+          "The AI request exceeded ten minutes. Accepted work is unchanged; retry or choose another installed tool.",
+          408,
+        );
+      throw error;
     } finally {
       clearTimeout(timer);
+      clearTimeout(progressTimer);
+      await flushProgress().catch(() => {});
       this.active.delete(run.id);
+      rpc.protocol.completed = Date.now();
+      await atomicJSON(
+        path.join(runRoot, `protocol-${rpc.protocol.invocation}.json`),
+        rpc.protocol,
+      ).catch(() => {});
+      await atomicJSON(path.join(runRoot, "protocol.json"), rpc.protocol).catch(
+        () => {},
+      );
       rpc.close();
     }
   }

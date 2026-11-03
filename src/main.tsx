@@ -5,6 +5,7 @@ import type {
   Snapshot,
   Component,
   Run,
+  Property,
 } from "../server/core/contracts";
 import type { Anchor, Edit } from "../server/core/source";
 import type { Scenario } from "../server/core/requirements";
@@ -68,18 +69,32 @@ function Studio() {
   const [tab, setTab] = useState("components");
   const [query, setQuery] = useState("");
   const [selection, setSelection] = useState("");
+  const [insertionSlot, setInsertionSlot] = useState("");
   const [page, setPage] = useState("");
   const [preview, setPreview] = useState<{
     id: string;
     url: string;
     revision: string;
+    label?: string;
   }>();
+  const previewRequest = useRef(0);
   const [scenario, setScenario] = useState("");
   const [capture, setCapture] = useState(false);
   const [annotate, setAnnotate] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [adapter, setAdapter] = useState<"codex" | "cursor">("codex");
-  const [change, setChange] = useState<Change>();
+  const [change, setChange] = useState<
+    Change & {
+      affectedAcceptedResults?: {
+        id: string;
+        text: string;
+        reason: string;
+        files: string[];
+      }[];
+      acceptedResultsConfirmation?: string;
+    }
+  >();
+  const [replaceAccepted, setReplaceAccepted] = useState(false);
   const [reviewRun, setReviewRun] = useState<Run>();
   const [undoDecision, setUndoDecision] = useState<{
     id: string;
@@ -110,6 +125,21 @@ function Studio() {
   }, [data?.state.id]);
   const outline = data?.outline.find((p) => p.id === page) ?? data?.outline[0];
   const node = outline?.nodes.find((n) => n.id === selection);
+  useEffect(
+    () =>
+      setInsertionSlot(
+        node?.component && !node.component.children
+          ? (node.component.slots[0] ?? "")
+          : "",
+      ),
+    [
+      node?.path,
+      node?.tag,
+      node?.component?.package,
+      node?.component?.export,
+      node?.component?.version,
+    ],
+  );
   const components =
     data?.snapshot.manifest.libraries.flatMap((l) => l.components) ?? [];
   const filtered = components.filter((c) =>
@@ -154,6 +184,9 @@ function Studio() {
   useEffect(() => {
     void load().catch((e) => setError(e.message));
     localStorage.setItem("studio-project", id);
+    previewRequest.current++;
+    if (preview)
+      void api(`/previews/${preview.id}`, undefined, "DELETE").catch(() => {});
     setPreview(undefined);
     setSelection("");
   }, [id]); // Project switch is the reload boundary.
@@ -201,20 +234,47 @@ function Studio() {
     }
   }
   useEffect(bridge, [selection, capture, annotate, preview]);
-  async function showPreview(component?: Component, example = 0) {
-    if (preview) await api(`/previews/${preview.id}`, undefined, "DELETE");
-    setPreview(
-      await api(`/projects/${id}/preview`, { scenario, component, example }),
-    );
+  async function showPreview(
+    component?: Component,
+    example = 0,
+    pageId = outline?.id,
+    scenarioId = scenario,
+  ) {
+    const request = ++previewRequest.current;
+    const previous = preview;
+    setPreview(undefined);
+    try {
+      if (previous) await api(`/previews/${previous.id}`, undefined, "DELETE");
+      const next = await api(`/projects/${id}/preview`, {
+        scenario: scenarioId,
+        component,
+        example,
+        page: pageId,
+      });
+      if (request !== previewRequest.current) {
+        await api(`/previews/${next.id}`, undefined, "DELETE");
+        return;
+      }
+      setPreview({
+        ...next,
+        label: component
+          ? `${component.name} · ${component.examples[example]?.name ?? "Common state"}`
+          : undefined,
+      });
+    } catch (error) {
+      if (request === previewRequest.current) throw error;
+    }
   }
   async function edit(values: Partial<Edit>) {
     if (!outline || !selection || !data) return;
-    await api(`/projects/${id}/edit`, {
+    const result = await api(`/projects/${id}/edit`, {
       base: data.snapshot.id,
       page: outline.id,
       edit: { anchor: selection, sourceHash: outline.hash, ...values },
     });
-    setSelection("");
+    const fresh = await api<Data>(`/projects/${id}`);
+    setData(fresh);
+    setSelection(result.selection ?? "");
   }
   async function undoAnnotation(result: string) {
     try {
@@ -241,10 +301,12 @@ function Studio() {
       prompt: text,
       adapter,
       annotation,
+      page: outline?.id,
     });
     setPrompt("");
   }
   async function review(run: Run) {
+    setReplaceAccepted(false);
     if (candidatePreview) {
       await api(`/previews/${candidatePreview.id}`, undefined, "DELETE");
       setCandidatePreview(undefined);
@@ -530,7 +592,11 @@ function Studio() {
                             disabled={!node}
                             onClick={() =>
                               void act("Adding component", () =>
-                                edit({ operation: "insert", component: c }),
+                                edit({
+                                  operation: "insert",
+                                  component: c,
+                                  slot: insertionSlot || undefined,
+                                }),
                               )
                             }
                           >
@@ -558,8 +624,14 @@ function Studio() {
                     aria-label="Page"
                     value={outline?.id ?? ""}
                     onChange={(e) => {
-                      setPage(e.target.value);
+                      const selected = e.target.value;
+                      setPage(selected);
+                      setScenario("");
                       setSelection("");
+                      if (preview)
+                        void act("Opening selected page", () =>
+                          showPreview(undefined, 0, selected, ""),
+                        );
                     }}
                   >
                     {data.outline.map((p) => (
@@ -637,6 +709,50 @@ function Studio() {
                           ? "Whole page"
                           : "Selected component"}
                       </small>
+                      {[
+                        "draft",
+                        "pending",
+                        "failed",
+                        "undone",
+                        "approved",
+                      ].includes(a.status) && (
+                        <form
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            const form = new FormData(event.currentTarget);
+                            void act("Revising annotation", () =>
+                              api(
+                                `/projects/${id}/annotations/${a.id}/revise`,
+                                {
+                                  base: data.snapshot.id,
+                                  text: String(form.get("text")),
+                                  page: form.get("retarget")
+                                    ? outline?.id
+                                    : a.page,
+                                  target: form.get("retarget")
+                                    ? selection || "page"
+                                    : a.target,
+                                },
+                              ),
+                            );
+                          }}
+                        >
+                          <label>
+                            Edit annotation
+                            <textarea
+                              name="text"
+                              defaultValue={a.text}
+                              required
+                            />
+                          </label>
+                          <label className="checkbox">
+                            <input name="retarget" type="checkbox" />
+                            Use current selection:{" "}
+                            {node?.component?.name ?? node?.tag ?? "Whole page"}
+                          </label>
+                          <button>Save and review again</button>
+                        </form>
+                      )}
                       {a.status === "accepted" && (
                         <button
                           onClick={() =>
@@ -777,7 +893,20 @@ function Studio() {
                 <select
                   aria-label="Scenario preview"
                   value={scenario}
-                  onChange={(e) => setScenario(e.target.value)}
+                  onChange={(e) => {
+                    const selected = e.target.value;
+                    const target =
+                      data.snapshot.manifest.scenarios.find(
+                        (binding) => binding.scenario === selected,
+                      )?.page ?? outline?.id;
+                    setScenario(selected);
+                    setPage(target ?? "");
+                    setSelection("");
+                    if (preview)
+                      void act("Opening selected scenario", () =>
+                        showPreview(undefined, 0, target, selected),
+                      );
+                  }}
                 >
                   <option value="">Current page</option>
                   {data.scope.scenarios.map((s) => (
@@ -861,9 +990,13 @@ function Studio() {
               </div>
               <div className="canvas-footer">
                 <span>
-                  {preview && preview.revision !== data.snapshot.id
-                    ? "Page changed · reset preview to see latest"
-                    : "Preview matches your saved page"}
+                  {preview?.label
+                    ? `Library example · ${preview.label}`
+                    : preview && preview.revision !== data.snapshot.id
+                      ? "Page changed · reset preview to see latest"
+                      : preview
+                        ? "Preview matches your saved page"
+                        : "Open preview to see the saved page"}
                 </span>
                 <span>
                   {data.snapshot.manifest.libraries.length}{" "}
@@ -994,61 +1127,44 @@ function Studio() {
                   )}
                   {node.component &&
                     Object.entries(node.component.props).map(([key, spec]) => (
-                      <div className="property" key={selection + key}>
-                        <label>
-                          {key}
-                          <small>{spec.description}</small>
-                          {spec.business ||
-                          (node.props[key] === undefined &&
-                            key in node.props) ? (
-                            <span className="hint">
-                              Defined by behavior. Use a prompt to preserve its
-                              interaction.
-                            </span>
-                          ) : spec.type === "enum" ? (
-                            <select
-                              value={String(
-                                node.props[key] ?? spec.default ?? "",
-                              )}
-                              onChange={(e) =>
-                                void act("Updating property", () =>
-                                  edit({
-                                    operation: "prop",
-                                    property: key,
-                                    value: e.target.value,
-                                  }),
-                                )
-                              }
-                            >
-                              {spec.options?.map((v) => (
-                                <option key={v}>{v}</option>
-                              ))}
-                            </select>
-                          ) : (
-                            <Field
-                              label=""
-                              initial={String(
-                                node.props[key] ?? spec.default ?? "",
-                              )}
-                              save={(value) =>
-                                act("Updating property", () =>
-                                  edit({
-                                    operation: "prop",
-                                    property: key,
-                                    value:
-                                      spec.type === "number"
-                                        ? Number(value)
-                                        : spec.type === "boolean"
-                                          ? value === "true"
-                                          : value,
-                                  }),
-                                )
-                              }
-                            />
-                          )}
-                        </label>
-                      </div>
+                      <PropertyControl
+                        key={node.path + key}
+                        label={
+                          spec.label ?? key.replace(/([a-z])([A-Z])/g, "$1 $2")
+                        }
+                        spec={spec}
+                        value={node.props[key] ?? spec.default}
+                        controlled={
+                          node.props[key] === undefined && key in node.props
+                        }
+                        save={(value) =>
+                          act("Updating property", () =>
+                            edit({ operation: "prop", property: key, value }),
+                          )
+                        }
+                      />
                     ))}
+                  {node.component?.slots.length ? (
+                    <label className="property">
+                      Add new components into
+                      <select
+                        aria-label="Insertion slot"
+                        value={insertionSlot}
+                        onChange={(event) =>
+                          setInsertionSlot(event.target.value)
+                        }
+                      >
+                        {node.component.children && (
+                          <option value="">Body</option>
+                        )}
+                        {node.component.slots.map((slot) => (
+                          <option key={slot} value={slot}>
+                            {slot.replace(/([a-z])([A-Z])/g, "$1 $2")}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
                   {[
                     "main",
                     "div",
@@ -1089,6 +1205,8 @@ function Studio() {
                         ))}
                       </div>
                       {[
+                        "flexDirection",
+                        "gridTemplateColumns",
                         "gap",
                         "padding",
                         "width",
@@ -1098,7 +1216,7 @@ function Studio() {
                         "justifyContent",
                       ].map((k) => (
                         <Field
-                          key={selection + k}
+                          key={node.path + k}
                           label={k}
                           initial={String((node.props.style as any)?.[k] ?? "")}
                           save={(value) =>
@@ -1117,7 +1235,124 @@ function Studio() {
                       ))}
                     </>
                   )}
+                  {[
+                    "main",
+                    "div",
+                    "section",
+                    "article",
+                    "aside",
+                    "header",
+                    "footer",
+                    "h1",
+                    "h2",
+                    "h3",
+                    "h4",
+                    "h5",
+                    "h6",
+                    "p",
+                    "span",
+                    "strong",
+                    "em",
+                    "small",
+                    "label",
+                    "li",
+                  ].includes(node.tag) && (
+                    <>
+                      <h3 className="section-title">Text and style</h3>
+                      <p className="hint">
+                        Use library tokens such as var(--text-color) or literal
+                        styles. Imported components use their documented
+                        settings above.
+                      </p>
+                      {[
+                        "color",
+                        "backgroundColor",
+                        "fontFamily",
+                        "fontSize",
+                        "fontWeight",
+                        "lineHeight",
+                        "textAlign",
+                        "borderRadius",
+                      ].map((key) => (
+                        <Field
+                          key={node.path + key}
+                          label={key.replace(/([a-z])([A-Z])/g, "$1 $2")}
+                          initial={String(
+                            (node.props.style as any)?.[key] ?? "",
+                          )}
+                          save={(value) =>
+                            act("Updating text style", () =>
+                              edit({
+                                operation: "style",
+                                value: {
+                                  [key]: /^\d+(?:\.\d+)?$/.test(value)
+                                    ? Number(value)
+                                    : value,
+                                },
+                              }),
+                            )
+                          }
+                        />
+                      ))}
+                    </>
+                  )}
                   <h3 className="section-title">Arrange</h3>
+                  <div className="arrange-buttons">
+                    {[-1, 1].map((direction) => (
+                      <button
+                        key={direction}
+                        disabled={
+                          !node.parent ||
+                          node.dynamic ||
+                          (outline?.nodes
+                            .filter(
+                              (sibling) =>
+                                sibling.parent === node.parent &&
+                                sibling.slot === node.slot,
+                            )
+                            .findIndex((sibling) => sibling.id === node.id) ??
+                            0) +
+                            direction <
+                            0 ||
+                          (outline?.nodes
+                            .filter(
+                              (sibling) =>
+                                sibling.parent === node.parent &&
+                                sibling.slot === node.slot,
+                            )
+                            .findIndex((sibling) => sibling.id === node.id) ??
+                            0) +
+                            direction >=
+                            (outline?.nodes.filter(
+                              (sibling) =>
+                                sibling.parent === node.parent &&
+                                sibling.slot === node.slot,
+                            ).length ?? 0)
+                        }
+                        onClick={() =>
+                          void act("Reordering component", () =>
+                            edit({
+                              operation: "move",
+                              parent: node.parent,
+                              slot: node.slot,
+                              index:
+                                (outline?.nodes
+                                  .filter(
+                                    (sibling) =>
+                                      sibling.parent === node.parent &&
+                                      sibling.slot === node.slot,
+                                  )
+                                  .findIndex(
+                                    (sibling) => sibling.id === node.id,
+                                  ) ?? 0) + direction,
+                            }),
+                          )
+                        }
+                      >
+                        {direction < 0 ? "Move earlier" : "Move later"}
+                      </button>
+                    ))}
+                  </div>
                   <div className="arrange-buttons">
                     <button
                       onClick={() =>
@@ -1146,22 +1381,42 @@ function Studio() {
                       onChange={(e) => {
                         if (e.target.value)
                           void act("Moving component", () =>
-                            edit({ operation: "move", parent: e.target.value }),
+                            edit({
+                              operation: "move",
+                              parent: e.target.value.split("#")[0],
+                              slot: e.target.value.split("#")[1] || undefined,
+                            }),
                           );
                       }}
                     >
                       <option value="">Choose container</option>
                       {outline?.nodes
                         .filter(
-                          (n) =>
-                            n.id !== selection &&
-                            (!n.component || n.component.children),
+                          (parent) =>
+                            parent.id !== selection &&
+                            (!parent.component ||
+                              parent.component.children ||
+                              parent.component.slots.length),
                         )
-                        .map((n) => (
-                          <option key={n.id} value={n.id}>
-                            {n.component?.name ?? n.tag} · {n.id.slice(0, 4)}
-                          </option>
-                        ))}
+                        .flatMap((parent, index) =>
+                          [
+                            ...(!parent.component || parent.component.children
+                              ? [{ slot: "", label: "Body" }]
+                              : []),
+                            ...(parent.component?.slots.map((slot) => ({
+                              slot,
+                              label: slot,
+                            })) ?? []),
+                          ].map(({ slot, label }) => (
+                            <option
+                              key={parent.id + slot}
+                              value={parent.id + "#" + slot}
+                            >
+                              {parent.component?.name ?? parent.tag} {index + 1}{" "}
+                              · {label}
+                            </option>
+                          )),
+                        )}
                     </select>
                   </label>
                   <button
@@ -1326,7 +1581,7 @@ function Studio() {
                 />
               )}
               {modal === "quality" && data && (
-                <Quality project={id} data={data} run={act} />
+                <Quality project={id} data={data} run={act} adapter={adapter} />
               )}
               {modal === "templates" && (
                 <Templates
@@ -1412,9 +1667,13 @@ function Studio() {
             </header>
             <div className="modal-body">
               <p>
-                {change.requiresConfirmation
-                  ? "This changes behavior. Confirm the corresponding Gherkin differences together with the implementation."
-                  : "This presentation change preserves the selected business requirements."}
+                {change.repair
+                  ? "This repair passed the unchanged reviewed scenario checks. Inspect its experience before accepting it."
+                  : change.requiresConfirmation
+                    ? "This changes behavior. Confirm the corresponding Gherkin differences together with the implementation."
+                    : change.behavior
+                      ? "This implements the selected written requirements. Inspect the generated scenarios before accepting."
+                      : "This presentation change preserves the selected business requirements."}
               </p>
               <button
                 onClick={() =>
@@ -1462,6 +1721,42 @@ function Studio() {
                   </div>
                 </details>
               ))}
+              {!!change.affectedAcceptedResults?.length &&
+                reviewRun.status === "review" && (
+                  <div className="notice">
+                    <strong>This rework affects accepted results</strong>
+                    <p>
+                      These results share changed source, requirements or
+                      business scenarios. Leave the proposal pending to preserve
+                      them, or approve replacing their acceptance. Their
+                      annotations remain available.
+                    </p>
+                    <ul>
+                      {change.affectedAcceptedResults.map((result) => (
+                        <li key={result.id}>
+                          <strong>{result.text}</strong>
+                          <p>
+                            {result.reason}
+                            {result.files.length
+                              ? `: ${result.files.join(", ")}`
+                              : ""}
+                          </p>
+                        </li>
+                      ))}
+                    </ul>
+                    <label className="checkbox">
+                      <input
+                        type="checkbox"
+                        checked={replaceAccepted}
+                        onChange={(event) =>
+                          setReplaceAccepted(event.target.checked)
+                        }
+                      />
+                      I reviewed these affected results and choose to replace
+                      them
+                    </label>
+                  </div>
+                )}
               <div className="dialog-actions">
                 <button onClick={() => setChange(undefined)}>
                   {reviewRun.status === "review"
@@ -1471,12 +1766,19 @@ function Studio() {
                 {reviewRun.status === "review" && (
                   <button
                     className="primary"
+                    disabled={
+                      !!change.affectedAcceptedResults?.length &&
+                      !replaceAccepted
+                    }
                     onClick={() =>
                       void act("Applying validated proposal", async () => {
                         await api(
                           `/projects/${id}/runs/${reviewRun.id}/apply`,
                           {
                             confirmRequirements: change.hash,
+                            confirmAcceptedResults: replaceAccepted
+                              ? change.acceptedResultsConfirmation
+                              : undefined,
                           },
                         );
                         setChange(undefined);
@@ -1484,9 +1786,13 @@ function Studio() {
                       })
                     }
                   >
-                    {change.requiresConfirmation
-                      ? "Confirm requirements and apply"
-                      : "Accept presentation change"}
+                    {change.repair
+                      ? "Accept verified repair"
+                      : change.requiresConfirmation
+                        ? "Confirm requirements and apply"
+                        : change.behavior
+                          ? "Accept generated implementation"
+                          : "Accept presentation change"}
                   </button>
                 )}
               </div>
@@ -1523,6 +1829,113 @@ function Field({
         }}
       />
     </label>
+  );
+}
+function PropertyControl({
+  label,
+  spec,
+  value,
+  controlled = false,
+  save,
+}: {
+  label: string;
+  spec: Property;
+  value: unknown;
+  controlled?: boolean;
+  save: (value: unknown) => Promise<void>;
+}) {
+  if (controlled || spec.business)
+    return (
+      <div className="property">
+        <strong>{label}</strong>
+        <p className="hint">
+          This setting belongs to the interaction. Describe its change in a
+          prompt.
+        </p>
+      </div>
+    );
+  if (spec.type === "object")
+    return (
+      <fieldset className="property-group">
+        <legend>{label}</legend>
+        <p className="hint">{spec.description}</p>
+        {spec.fields ? (
+          Object.entries(spec.fields).map(([key, child]) => (
+            <PropertyControl
+              key={key}
+              label={label + " · " + (child.label ?? child.description ?? key)}
+              spec={child}
+              value={
+                (value as Record<string, unknown> | undefined)?.[key] ??
+                child.default
+              }
+              save={(next) =>
+                save({
+                  ...(((value && typeof value === "object"
+                    ? value
+                    : spec.default) as Record<string, unknown>) ?? {}),
+                  [key]: next,
+                })
+              }
+            />
+          ))
+        ) : (
+          <p className="hint">
+            Use a prompt to preserve this structured setting.
+          </p>
+        )}
+      </fieldset>
+    );
+  if (spec.type === "enum" || spec.type === "boolean")
+    return (
+      <label className="property">
+        {label}
+        <small>{spec.description}</small>
+        <select
+          value={value === undefined ? "" : String(value)}
+          onChange={(event) =>
+            void save(
+              event.target.value === ""
+                ? undefined
+                : spec.type === "boolean"
+                  ? event.target.value === "true"
+                  : event.target.value,
+            )
+          }
+        >
+          {!spec.required && <option value="">Library default</option>}
+          {(spec.type === "boolean"
+            ? ["true", "false"]
+            : (spec.options ?? [])
+          ).map((option) => (
+            <option key={option} value={option}>
+              {spec.type === "boolean"
+                ? option === "true"
+                  ? "On"
+                  : "Off"
+                : option}
+            </option>
+          ))}
+        </select>
+      </label>
+    );
+  return (
+    <div className="property">
+      <Field
+        label={label}
+        initial={String(value ?? "")}
+        save={(next) =>
+          save(
+            spec.type === "number"
+              ? next === "" && !spec.required
+                ? undefined
+                : Number(next)
+              : next,
+          )
+        }
+      />
+      <small className="hint">{spec.description}</small>
+    </div>
   );
 }
 async function readUploads(files: FileList | null) {
@@ -1662,13 +2075,7 @@ function Requirements({
       </p>
       <button
         className="primary"
-        onClick={() =>
-          void save(
-            files,
-            chosen.map((f) => f.replace(/\.md$/, "-1.feature")),
-            confirm,
-          )
-        }
+        onClick={() => void save(files, chosen, confirm)}
       >
         Use selected requirements
       </button>
@@ -1819,7 +2226,11 @@ function ImportSource({
   finish: (id: string) => void;
 }) {
   const [archive, setArchive] = useState("");
+  const [markdownConfirmed, setMarkdownConfirmed] = useState(false);
   const [report, setReport] = useState<any>();
+  const [previewStories, setPreviewStories] = useState<Record<string, string>>(
+    {},
+  );
   const [requirements, setRequirements] = useState<Record<string, string>>({});
   return (
     <>
@@ -1842,6 +2253,8 @@ function ImportSource({
                   text += String.fromCharCode(x);
                 setArchive(btoa(text));
                 setReport(undefined);
+                setMarkdownConfirmed(false);
+                setPreviewStories({});
               });
           }}
         />
@@ -1851,9 +2264,14 @@ function ImportSource({
         <input
           type="file"
           multiple
-          accept=".feature"
+          accept=".feature,.md"
           onChange={(e) =>
-            void readUploads(e.target.files).then(setRequirements)
+            void readUploads(e.target.files).then((files) => {
+              setRequirements(files);
+              setReport(undefined);
+              setMarkdownConfirmed(false);
+              setPreviewStories({});
+            })
           }
         />
       </label>
@@ -1874,6 +2292,64 @@ function ImportSource({
               ? "Native Studio source"
               : "Legacy source compatibility"}
           </strong>
+          {!report.native &&
+            report.manifest.pages.map(
+              (page: Snapshot["manifest"]["pages"][number]) => (
+                <label key={page.id}>
+                  Editing preview for {page.title}
+                  <select
+                    value={previewStories[page.id] ?? page.previewStory ?? ""}
+                    onChange={(event) =>
+                      setPreviewStories({
+                        ...previewStories,
+                        [page.id]: event.target.value,
+                      })
+                    }
+                  >
+                    {report.stories
+                      .filter(
+                        (story: { page: string }) => story.page === page.id,
+                      )
+                      .map((story: { file: string; name: string }) => (
+                        <option
+                          key={story.file + "#" + story.name}
+                          value={story.file + "#" + story.name}
+                        >
+                          {story.name} · {story.file}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+              ),
+            )}
+          {!!report.markdownProposals?.length && (
+            <div className="notice">
+              <strong>Review extracted Gherkin</strong>
+              <p>
+                Review every block against the supplied document. Prose is not
+                executable requirements. These .feature files become the
+                requirements Studio edits and exports.
+              </p>
+              {report.markdownProposals.map(
+                (proposal: { file: string; source: string }) => (
+                  <details key={proposal.file} open>
+                    <summary>{proposal.file}</summary>
+                    <pre>{proposal.source}</pre>
+                  </details>
+                ),
+              )}
+              <label className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={markdownConfirmed}
+                  onChange={(event) =>
+                    setMarkdownConfirmed(event.target.checked)
+                  }
+                />
+                I reviewed the extracted blocks and resolved discrepancies
+              </label>
+            </div>
+          )}
           {report.diagnostics.map((d: string) => (
             <p key={d}>{d}</p>
           ))}
@@ -1884,13 +2360,18 @@ function ImportSource({
           </p>
           <button
             className="primary"
-            disabled={report.diagnostics.length > 0}
+            disabled={
+              report.diagnostics.length > 0 ||
+              (!!report.markdownProposals?.length && !markdownConfirmed)
+            }
             onClick={() =>
               void run("Opening imported project", async () => {
                 const p = await api("/import", {
                   archive,
                   requirements,
                   confirm: true,
+                  previewStories,
+                  confirmMarkdown: markdownConfirmed,
                 });
                 finish(p.state.id);
               })
@@ -1907,12 +2388,15 @@ function Quality({
   project,
   data,
   run,
+  adapter,
 }: {
   project: string;
+  adapter: "codex" | "cursor";
   data: Data;
   run: (s: string, f: () => Promise<unknown>) => Promise<void>;
 }) {
   const [report, setReport] = useState<any>();
+  const [stories, setStories] = useState<{ story: string; name: string }[]>();
   return (
     <>
       <p>
@@ -1922,8 +2406,19 @@ function Quality({
       </p>
       <div className="notice">
         Passing checks is necessary. Review the scenario-to-test interpretation
-        and accept the visual experience before handing off.
+        and accept the visual experience before handing off. Failed reviewed
+        scenarios trigger one bounded repair proposal using your selected AI
+        tool; accepted source changes only after your review.
       </div>
+      <button
+        onClick={() =>
+          void run("Reading original scenario stories", async () =>
+            setStories(await api(`/projects/${project}/stories`)),
+          )
+        }
+      >
+        Choose existing scenario stories
+      </button>
       {data.scope.scenarios.map((scenario) => {
         const binding = data.snapshot.manifest.scenarios.find(
           (b) => b.scenario === scenario.id,
@@ -1934,6 +2429,56 @@ function Quality({
               {scenario.name} ·{" "}
               {binding?.accepted ? "Test plan reviewed" : "Review needed"}
             </summary>
+            {stories && (
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const values = new FormData(event.currentTarget);
+                  void run("Saving explicit scenario mapping", () =>
+                    api(`/projects/${project}/scenarios/${scenario.id}/map`, {
+                      base: data.snapshot.id,
+                      story: values.get("story"),
+                      page: values.get("page"),
+                    }),
+                  );
+                }}
+              >
+                <label>
+                  Original story
+                  <select
+                    name="story"
+                    defaultValue={binding?.story ?? stories[0]?.story}
+                  >
+                    {stories.map((story) => (
+                      <option key={story.story} value={story.story}>
+                        {story.name} · {story.story.split("#")[0]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Page
+                  <select
+                    name="page"
+                    defaultValue={
+                      binding?.page ?? data.snapshot.manifest.pages[0]?.id
+                    }
+                  >
+                    {data.snapshot.manifest.pages.map((page) => (
+                      <option key={page.id} value={page.id}>
+                        {page.title}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <p className="hint">
+                  Use the original story's mock state, arguments and decorators.
+                  Mapping never adds business scope. Ask Studio for executable
+                  checks, then review each requirement step below.
+                </p>
+                <button>Map this scenario to this story</button>
+              </form>
+            )}
             {scenario.steps.map((step) => (
               <div className="scenario-step" key={step.id}>
                 <strong>{step.text}</strong>
@@ -1975,12 +2520,19 @@ function Quality({
         className="primary"
         onClick={() =>
           void run("Checking startup and scenario interactions", async () =>
-            setReport(await api(`/projects/${project}/quality`, {})),
+            setReport(await api(`/projects/${project}/quality`, { adapter })),
           )
         }
       >
         Run deliverability checks
       </button>
+      {report?.repairRun && (
+        <p className="notice">
+          Studio is attempting one bounded repair of the failed reviewed
+          scenarios. Your saved page stays unchanged. Review the result in Make
+          a change; unresolved failures remain listed here.
+        </p>
+      )}
       {report && (
         <>
           <h3>

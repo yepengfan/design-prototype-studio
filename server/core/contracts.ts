@@ -5,6 +5,7 @@ export type Files = z.infer<typeof filesSchema>;
 export type Property = {
   type: "string" | "number" | "boolean" | "enum" | "object";
   description: string;
+  label?: string;
   options?: string[];
   required?: boolean;
   business: boolean;
@@ -15,6 +16,7 @@ const propertySchema: z.ZodType<Property> = z.lazy(() =>
   z.object({
     type: z.enum(["string", "number", "boolean", "enum", "object"]),
     description: z.string(),
+    label: z.string().optional(),
     options: z.array(z.string()).optional(),
     required: z.boolean().optional(),
     business: z.boolean().default(false),
@@ -29,8 +31,11 @@ export const componentSchema = z.object({
   version: z.string(),
   description: z.string().min(1),
   provenance: z.string(),
+  api: z.string().optional(),
+  documentation: z.string().optional(),
   props: z.record(z.string(), propertySchema),
   children: z.boolean().default(false),
+  requiresBehavior: z.boolean().default(false),
   slots: z.array(z.string()).default([]),
   examples: z
     .array(
@@ -38,6 +43,14 @@ export const componentSchema = z.object({
         name: z.string(),
         props: z.record(z.string(), z.unknown()),
         children: z.string().optional(),
+        story: z
+          .object({
+            file: z.string(),
+            export: z.string(),
+            annotations: z.string().optional(),
+          })
+          .optional(),
+        source: z.string().optional(),
       }),
     )
     .min(1),
@@ -74,6 +87,7 @@ export const scenarioBindingSchema = z.object({
 });
 export const manifestSchema = z.object({
   schemaVersion: z.literal(1),
+  sourceOrigin: z.enum(["native", "legacy"]).optional(),
   generationState: z.enum(["unstarted", "generated"]).default("generated"),
   name: z.string().min(1),
   pages: z.array(
@@ -82,6 +96,7 @@ export const manifestSchema = z.object({
       title: z.string(),
       file: z.string(),
       export: z.string(),
+      previewStory: z.string().optional(),
     }),
   ),
   scope: z.array(z.string()),
@@ -156,6 +171,7 @@ export type ProjectState = {
 };
 export type Run = {
   id: string;
+  page?: string;
   adapter: "codex" | "cursor";
   base: string;
   prompt: string;
@@ -174,6 +190,7 @@ export type Run = {
   error?: string;
   annotation?: string;
   annotationText?: string;
+  repair?: boolean;
   appliedBase?: string;
   appliedRevision?: string;
 };

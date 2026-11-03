@@ -2,7 +2,7 @@ import { createServer } from "vite";
 import { Project, Node } from "ts-morph";
 import { digest } from "./core/files.js";
 
-const [root, editorOrigin] = process.argv.slice(2);
+const [root, editorOrigin, dependencyRoot] = process.argv.slice(2);
 const bridge = `<script type="module">
 let capture=false;
 addEventListener('message',e=>{if(e.source!==parent||e.origin!==${JSON.stringify(editorOrigin)})return;if(e.data?.type==='studio:capture')capture=e.data.enabled;if(e.data?.type==='studio:highlight'){document.querySelectorAll('[data-studio-selected]').forEach(n=>n.removeAttribute('data-studio-selected'));document.querySelectorAll('[data-studio-id="'+CSS.escape(e.data.id)+'"]').forEach(n=>n.setAttribute('data-studio-selected',''));}});
@@ -12,6 +12,7 @@ addEventListener('error',e=>parent.postMessage({type:'studio:error',message:e.me
 const server = await createServer({
   root,
   configFile: root + "/vite.config.ts",
+  cacheDir: root + "/.studio-preview-cache",
   plugins: [
     {
       name: "studio-select",
@@ -54,7 +55,7 @@ const server = await createServer({
     port: 0,
     strictPort: false,
     cors: false,
-    fs: { strict: true, allow: [root] },
+    fs: { strict: true, allow: [root, dependencyRoot].filter(Boolean) },
   },
 });
 await server.listen();

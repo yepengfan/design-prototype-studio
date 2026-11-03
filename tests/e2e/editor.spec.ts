@@ -1,3 +1,4 @@
+import { accountFreeAI } from "../account-free-ai";
 import { test, expect } from "@playwright/test";
 import { createServer } from "node:http";
 import { promises as fs } from "node:fs";
@@ -14,6 +15,7 @@ test.beforeAll(async () => {
   const prior = process.env.npm_config_userconfig;
   process.env.npm_config_userconfig = registry.config;
   const studio = await createApp({
+    ai: accountFreeAI,
     root: path.join(root, "data"),
     origin: "http://127.0.0.1:4311",
   });
@@ -28,7 +30,7 @@ test.beforeAll(async () => {
     server.listen(4311, "127.0.0.1", resolve),
   );
   cleanup = async () => {
-    studio.close();
+    await studio.close();
     await vite.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await registry.close();
@@ -115,4 +117,95 @@ test("designer chooses scope, admits a real private library, composes and edits 
     page.locator(".outline button").filter({ hasText: "Card" }),
   ).toBeVisible();
   expect(errors).toEqual([]);
+});
+
+test("designer composes genuine compound components in named slots and edits structured properties", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByLabel("Project name").fill("Named regions");
+  await page.getByRole("button", { name: "Create blank project" }).click();
+  await page.getByRole("button", { name: "Choose requirements ⌄" }).click();
+  await page
+    .getByLabel("Gherkin requirements")
+    .fill(
+      "Feature: Notice composition\nScenario: Read a notice\nGiven a notice is available\nThen its heading is visible\n",
+    );
+  await page.getByRole("button", { name: "Use selected requirements" }).click();
+  await page
+    .getByRole("button", { name: "Import a library", exact: true })
+    .click();
+  await page.getByLabel("Package name").fill("@studio-test/layout");
+  await page.getByLabel("Exact version").fill("1.0.0");
+  await page.getByLabel("Registry URL").fill(registry.base);
+  await page.getByRole("checkbox").check();
+  await page.getByRole("button", { name: "Preview import impact" }).click();
+  await expect(
+    page.getByRole("button", { name: "Confirm and import release" }),
+  ).toBeVisible({ timeout: 150000 });
+  await page
+    .getByRole("button", { name: "Confirm and import release" })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Panel", exact: true }),
+  ).toBeVisible({ timeout: 150000 });
+  const add = async (name: string) => {
+    await page.getByRole("button", { name: "Components", exact: true }).click();
+    await page
+      .getByRole("article")
+      .filter({ has: page.getByRole("heading", { name, exact: true }) })
+      .getByRole("button", { name: "+ Add", exact: true })
+      .click();
+    await expect(page.locator(".progress")).toHaveCount(0, { timeout: 150000 });
+  };
+  const select = async (name: string) => {
+    await page.getByRole("button", { name: "Outline", exact: true }).click();
+    await page.locator(".outline button").filter({ hasText: name }).click();
+  };
+  await select("main");
+  await add("Panel");
+  await select("Panel");
+  await page.getByLabel("Insertion slot").selectOption("header");
+  await add("Notice frame");
+  await select("Notice frame");
+  await add("Notice heading");
+  await page.getByRole("button", { name: "Open preview" }).click();
+  const frame = page.frameLocator('iframe[title="Live React preview"]');
+  const panel = frame.getByRole("region", { name: "Panel", exact: true });
+  await expect(
+    panel.getByRole("heading", { name: "Notice heading" }),
+  ).toBeVisible({ timeout: 150000 });
+  await select("Panel");
+  await page
+    .getByLabel("spacing · Horizontal inset", { exact: true })
+    .fill("24");
+  await page
+    .getByLabel("spacing · Horizontal inset", { exact: true })
+    .press("Tab");
+  await expect(page.locator(".progress")).toHaveCount(0, { timeout: 150000 });
+  await expect(panel).toHaveCSS("padding-left", "24px");
+  await select("Notice heading");
+  const destination = await page
+    .getByLabel("Move component into")
+    .getByRole("option", { name: /Panel .*footer/i })
+    .getAttribute("value");
+  await page.getByLabel("Move component into").selectOption(destination!);
+  await expect(page.locator(".progress")).toHaveCount(0, { timeout: 150000 });
+  await expect(
+    panel.getByRole("heading", { name: "Notice heading" }),
+  ).toBeVisible();
+  const text = await panel.innerText();
+  expect(text.indexOf("Panel body")).toBeLessThan(
+    text.indexOf("Notice heading"),
+  );
+  await page.getByRole("button", { name: "Duplicate", exact: true }).click();
+  await expect(page.locator(".progress")).toHaveCount(0, { timeout: 150000 });
+  await expect(
+    panel.getByRole("heading", { name: "Notice heading" }),
+  ).toHaveCount(2);
+  await page.screenshot({
+    path: test.info().outputPath("named-slots.png"),
+    fullPage: true,
+    animations: "disabled",
+  });
 });

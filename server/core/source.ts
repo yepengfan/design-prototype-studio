@@ -13,6 +13,7 @@ import { StudioError, type Component, type Property } from "./contracts.js";
 type Element = JsxElement | JsxSelfClosingElement;
 export type Anchor = {
   id: string;
+  path: string;
   tag: string;
   start: number;
   end: number;
@@ -34,10 +35,10 @@ function parse(source: string) {
   });
   return project.createSourceFile("page.tsx", source);
 }
-function literal(node: Node | undefined): unknown {
+export function literalValue(node: Node | undefined): unknown {
   if (!node) return undefined;
   if (Node.isParenthesizedExpression(node))
-    return literal(node.getExpression());
+    return literalValue(node.getExpression());
   if (Node.isStringLiteral(node) || Node.isNumericLiteral(node))
     return node.getLiteralValue();
   if (node.getKind() === SyntaxKind.TrueKeyword) return true;
@@ -49,7 +50,7 @@ function literal(node: Node | undefined): unknown {
   )
     return Number(node.getText());
   if (Node.isArrayLiteralExpression(node)) {
-    const values = node.getElements().map(literal);
+    const values = node.getElements().map(literalValue);
     return values.includes(undefined) ? undefined : values;
   }
   if (Node.isObjectLiteralExpression(node)) {
@@ -60,7 +61,7 @@ function literal(node: Node | undefined): unknown {
         Node.isComputedPropertyName(property.getNameNode())
       )
         return undefined;
-      const v = literal(property.getInitializer());
+      const v = literalValue(property.getInitializer());
       if (v === undefined) return undefined;
       result[property.getName().replace(/^['"]|['"]$/g, "")] = v;
     }
@@ -71,7 +72,7 @@ function literal(node: Node | undefined): unknown {
 function value(text: string, attribute = false): unknown {
   const expression =
     attribute && text.startsWith("{") ? text.slice(1, -1) : text;
-  return literal(
+  return literalValue(
     parse(`const value = (${expression});`)
       .getVariableDeclaration("value")
       ?.getInitializer(),
@@ -80,12 +81,20 @@ function value(text: string, attribute = false): unknown {
 function nodes(file: SourceFile) {
   return file.getDescendants().filter(jsx);
 }
+function owningSlot(node: Element, parent: Element | undefined) {
+  for (const ancestor of node.getAncestors()) {
+    if (ancestor === parent) break;
+    if (Node.isJsxAttribute(ancestor)) return ancestor.getNameNode().getText();
+  }
+  return undefined;
+}
 export function anchors(
   source: string,
   components: Component[] = [],
 ): Anchor[] {
   const file = parse(source);
   const imports = new Map<string, Component>();
+  const bindings = new Map<string, import("typescript").Symbol | undefined>();
   for (const declaration of file.getImportDeclarations()) {
     for (const component of components.filter(
       (c) => c.package === declaration.getModuleSpecifierValue(),
@@ -100,7 +109,25 @@ export function anchors(
         (reference.root === "default"
           ? declaration.getDefaultImport()?.getText()
           : undefined);
-      if (local) imports.set(local + reference.suffix, component);
+      const namespace = declaration.getNamespaceImport();
+      if (namespace) {
+        imports.set(
+          `${namespace.getText()}.${reference.root}${reference.suffix}`,
+          component,
+        );
+        bindings.set(
+          namespace.getText(),
+          namespace.getSymbol()?.compilerSymbol,
+        );
+      }
+      if (local) {
+        imports.set(local + reference.suffix, component);
+        const identifier =
+          named?.getAliasNode() ??
+          named?.getNameNode() ??
+          declaration.getDefaultImport();
+        bindings.set(local, identifier?.getSymbol()?.compilerSymbol);
+      }
     }
   }
   const elements = nodes(file);
@@ -108,6 +135,18 @@ export function anchors(
   // IDs are revision-scoped anchors. Every operation also checks the full source hash.
   for (const n of elements)
     ids.set(n, digest([n.getStart(), n.getText()]).slice(0, 16));
+  const paths = new Map<Element, string>();
+  const counters = new Map<string, number>();
+  for (const node of elements) {
+    const parent = node.getAncestors().find(jsx);
+    const group =
+      (parent ? paths.get(parent)! : "root") +
+      "/" +
+      (owningSlot(node, parent) ?? "children");
+    const index = counters.get(group) ?? 0;
+    counters.set(group, index + 1);
+    paths.set(node, group + "/" + index);
+  }
   return elements.map((n) => {
     const op = opening(n);
     const props: Record<string, unknown> = {};
@@ -119,14 +158,23 @@ export function anchors(
           : true;
       }
     const ancestor = n.getAncestors().find(jsx);
-    const tag = op.getTagNameNode().getText();
+    const tagNode = op.getTagNameNode();
+    const tag = tagNode.getText();
+    let root: Node = tagNode;
+    while (Node.isPropertyAccessExpression(root)) root = root.getExpression();
+    const component = imports.get(tag);
+    const genuine =
+      component &&
+      Node.isIdentifier(root) &&
+      root.getSymbol()?.compilerSymbol === bindings.get(root.getText());
     return {
       id: ids.get(n)!,
+      path: paths.get(n)!,
       tag,
       start: n.getStart(),
       end: n.getEnd(),
       parent: ancestor ? ids.get(ancestor) : undefined,
-      slot: n.getAncestors().find(Node.isJsxAttribute)?.getNameNode().getText(),
+      slot: owningSlot(n, ancestor),
       props,
       text:
         Node.isJsxElement(n) &&
@@ -156,7 +204,7 @@ export function anchors(
         .some(
           (a) => Node.isCallExpression(a) || Node.isConditionalExpression(a),
         ),
-      component: imports.get(tag),
+      component: genuine ? component : undefined,
     };
   });
 }
@@ -202,6 +250,10 @@ export function editSource(
   const all = nodes(file);
   const node = all.find((n) => n.getStart() === anchor.start)!;
   const op = opening(node);
+  if (edit.operation === "remove" && !anchor.parent)
+    throw new StudioError(
+      "Keep a page container. Select its contents to remove or rearrange them.",
+    );
   if (
     anchor.dynamic &&
     ["move", "remove", "duplicate"].includes(edit.operation)
@@ -210,7 +262,15 @@ export function editSource(
       "This item repeats or depends on a condition. Use a prompt to preserve the matching scenario behavior.",
     );
   const business =
-    (edit.operation === "remove" && !!anchor.component) ||
+    (edit.operation === "remove" &&
+      (!!anchor.component ||
+        /^[A-Z]/.test(anchor.tag) ||
+        found.some(
+          (child) =>
+            child.start > anchor.start &&
+            child.end < anchor.end &&
+            (child.component || /^[A-Z]/.test(child.tag)),
+        ))) ||
     (edit.operation === "prop" &&
       !!anchor.component?.props[edit.property ?? ""] &&
       businessPropertyChanged(
@@ -230,7 +290,7 @@ export function editSource(
       throw new StudioError(
         "The library does not document this editable property.",
       );
-    if (!propertyValueValid(spec, edit.value))
+    if (edit.value !== undefined && !propertyValueValid(spec, edit.value))
       throw new StudioError(
         "This value does not match the documented component property.",
       );
@@ -248,6 +308,14 @@ export function editSource(
       throw new StudioError(
         "This property is controlled by page behavior. Change it through a prompt to preserve its controller.",
       );
+    if (edit.value === undefined) {
+      if (spec.required || op.getAttributes().some(Node.isJsxSpreadAttribute))
+        throw new StudioError(
+          "This setting cannot be cleared safely. Use a prompt.",
+        );
+      existing?.remove();
+      return file.getFullText();
+    }
     if (existing)
       existing.replaceWithText(
         `${edit.property}={${JSON.stringify(edit.value)}}`,
@@ -267,35 +335,91 @@ export function editSource(
     const to = children.at(-1)?.getEnd() ?? from;
     file.replaceText([from, to], `{${JSON.stringify(String(edit.value))}}`);
   } else if (edit.operation === "style") {
-    if (
-      ![
-        "div",
-        "section",
-        "main",
-        "article",
-        "aside",
-        "header",
-        "footer",
-      ].includes(anchor.tag)
-    )
+    const containers = [
+      "div",
+      "section",
+      "main",
+      "article",
+      "aside",
+      "header",
+      "footer",
+      "form",
+    ];
+    const textElements = [
+      "h1",
+      "h2",
+      "h3",
+      "h4",
+      "h5",
+      "h6",
+      "p",
+      "span",
+      "strong",
+      "em",
+      "small",
+      "label",
+      "li",
+    ];
+    if (![...containers, ...textElements].includes(anchor.tag))
       throw new StudioError(
-        "Layout edits apply to layout containers. Use documented library properties for components.",
+        "Use documented library properties for component styling.",
       );
-    const allowed = [
+    const typography = [
+      "color",
+      "backgroundColor",
+      "fontFamily",
+      "fontSize",
+      "fontWeight",
+      "lineHeight",
+      "letterSpacing",
+      "textAlign",
+      "borderRadius",
+    ];
+    const layout = [
       "display",
       "flexDirection",
+      "flexWrap",
       "alignItems",
       "justifyContent",
       "gap",
+      "rowGap",
+      "columnGap",
       "padding",
+      "paddingTop",
+      "paddingRight",
+      "paddingBottom",
+      "paddingLeft",
       "width",
-      "minHeight",
+      "height",
+      "minWidth",
       "maxWidth",
+      "minHeight",
+      "maxHeight",
       "gridTemplateColumns",
+      "gridTemplateRows",
+      "alignContent",
     ];
+    const allowed = containers.includes(anchor.tag)
+      ? [...layout, ...typography]
+      : typography;
     const settings = edit.value as Record<string, unknown>;
-    if (!settings || Object.keys(settings).some((k) => !allowed.includes(k)))
-      throw new StudioError("Unsupported layout property.");
+    if (
+      !settings ||
+      Array.isArray(settings) ||
+      Object.entries(settings).some(
+        ([key, value]) =>
+          !allowed.includes(key) ||
+          !["string", "number"].includes(typeof value),
+      )
+    )
+      throw new StudioError("Unsupported literal style setting.");
+    if (
+      settings.display !== undefined &&
+      !["block", "flex", "grid", "inline-flex", "inline-grid"].includes(
+        String(settings.display),
+      )
+    )
+      throw new StudioError("Choose flow, stack or grid for the container.");
     const existing = op.getAttribute("style");
     let current: Record<string, unknown> = {};
     if (existing && Node.isJsxAttribute(existing)) {
@@ -321,11 +445,29 @@ export function editSource(
     const initializer = `{${JSON.stringify(current)}}`;
     if (existing) existing.replaceWithText(`style=${initializer}`);
     else op.addAttribute({ name: "style", initializer });
-  } else if (edit.operation === "remove")
-    file.replaceText([node.getStart(), node.getEnd()], "");
-  else if (edit.operation === "duplicate")
-    file.insertText(node.getEnd(), "\n" + node.getText());
-  else if (edit.operation === "wrap") {
+  } else if (edit.operation === "remove") {
+    const patch = removalPatch(node);
+    file.replaceText([patch.start, patch.end], patch.text);
+  } else if (edit.operation === "duplicate") {
+    if (!anchor.parent)
+      throw new StudioError(
+        "Choose an item inside the page before duplicating it.",
+      );
+    if (anchor.slot) {
+      const parentAnchor = found.find((a) => a.id === anchor.parent)!;
+      const parent = all.find((n) => n.getStart() === parentAnchor.start)!;
+      const siblings = found.filter(
+        (a) => a.parent === anchor.parent && a.slot === anchor.slot,
+      );
+      const patch = slotPatch(
+        parent,
+        anchor.slot,
+        node.getText(),
+        siblings.findIndex((a) => a.id === anchor.id) + 1,
+      );
+      file.replaceText([patch.start, patch.end], patch.text);
+    } else file.insertText(node.getEnd(), "\n" + node.getText());
+  } else if (edit.operation === "wrap") {
     const style =
       edit.layout === "grid"
         ? { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }
@@ -336,10 +478,7 @@ export function editSource(
       `<section style={${JSON.stringify(style)}}>${node.getText()}</section>`,
     );
   } else if (edit.operation === "insert") {
-    if (!edit.slot && !Node.isJsxElement(node))
-      throw new StudioError(
-        "Choose a container with a supported children slot.",
-      );
+    if (!edit.slot) assertChildrenSlot(anchor);
     if (
       edit.slot
         ? !anchor.component?.slots.includes(edit.slot)
@@ -356,6 +495,7 @@ export function editSource(
     if (!c)
       throw new StudioError("Import and inspect this component library first.");
     if (
+      c.requiresBehavior ||
       Object.entries(c.props).some(
         ([name, p]) =>
           p.required &&
@@ -365,6 +505,7 @@ export function editSource(
     )
       throw new StudioError(
         "This component needs required business configuration. Use a prompt with complete requirements.",
+        422,
       );
     const reference = componentReference(c.export);
     let local: string;
@@ -401,8 +542,17 @@ export function editSource(
       file.replaceText([patch.start, patch.end], patch.text);
       return file.getFullText();
     }
-    if (!Node.isJsxElement(node))
-      throw new StudioError("Choose a supported container.");
+    if (!Node.isJsxElement(node)) {
+      const current = node.getText();
+      file.replaceText(
+        [node.getStart(), node.getEnd()],
+        current.slice(0, -2) +
+          ">" +
+          text +
+          `</${op.getTagNameNode().getText()}>`,
+      );
+      return file.getFullText();
+    }
     const children = node.getJsxChildren();
     const pos =
       children[edit.index ?? children.length]?.getStart() ??
@@ -430,7 +580,7 @@ export function editSource(
       );
       const patches = [patch];
       if (!(patch.start <= node.getStart() && patch.end >= node.getEnd()))
-        patches.push({ start: node.getStart(), end: node.getEnd(), text: "" });
+        patches.push(removalPatch(node));
       let result = source;
       for (const p of patches.sort((a, b) => b.start - a.start))
         result = result.slice(0, p.start) + p.text + result.slice(p.end);
@@ -438,8 +588,7 @@ export function editSource(
     }
     if (!Node.isJsxElement(parent))
       throw new StudioError("Choose a supported container.");
-    if (target?.component && !target.component.children)
-      throw new StudioError("This parent has no documented children slot.");
+    if (target) assertChildrenSlot(target);
     const children = parent
       .getJsxChildren()
       .filter(jsx)
@@ -454,7 +603,7 @@ export function editSource(
       throw new StudioError("Cannot move a node inside itself.");
     // Apply offsets in descending order to avoid stale AST references.
     const patches = [
-      { start, end, text: "" },
+      { start, end, text: removalPatch(node).text },
       { start: pos, end: pos, text: "\n" + text + "\n" },
     ].sort((a, b) => b.start - a.start);
     let result = source;
@@ -595,4 +744,38 @@ function businessPropertyChanged(
       ),
     );
   return false;
+}
+
+function assertChildrenSlot(anchor: Anchor) {
+  if (
+    anchor.component
+      ? !anchor.component.children
+      : ![
+          "main",
+          "div",
+          "section",
+          "article",
+          "aside",
+          "header",
+          "footer",
+          "form",
+          "nav",
+          "ul",
+          "ol",
+          "li",
+          "fieldset",
+        ].includes(anchor.tag)
+  )
+    throw new StudioError(
+      "This group's editable regions are not established. Use a prompt to preserve its layout.",
+    );
+}
+
+function removalPatch(node: Element) {
+  const parent = node.getParent();
+  return {
+    start: node.getStart(),
+    end: node.getEnd(),
+    text: Node.isJsxElement(parent) || Node.isJsxFragment(parent) ? "" : "null",
+  };
 }

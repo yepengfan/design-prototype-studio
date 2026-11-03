@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { runCommand } from "../server/core/process";
 // These are real synthetic published packages for private-registry acceptance only.
 // They are not Studio runtime controls or substitutes for a designer's library.
-export async function registryFixture(root: string) {
+export async function registryFixture(root: string, port = 0) {
   const packages = new Map<
     string,
     { tarball: Buffer; integrity: string; manifest: any }
@@ -167,7 +167,7 @@ export async function registryFixture(root: string) {
     if (packed.code) throw new Error("Fixture npm pack failed");
     const packedName = JSON.parse(packed.stdout)[0].filename;
     const tarball = await fs.readFile(path.join(dir, packedName));
-    packages.set(name, {
+    packages.set(name + "@1.0.0", {
       tarball,
       integrity:
         "sha512-" + createHash("sha512").update(tarball).digest("base64"),
@@ -176,41 +176,66 @@ export async function registryFixture(root: string) {
   }
   let base = "";
   let authenticatedRequests = 0;
+  let held = false;
+  const pendingResponses = new Set<import("node:http").ServerResponse>();
   const server = createServer((req, res) => {
     if (req.headers.authorization !== "Bearer synthetic-local-fixture") {
       res.writeHead(401);
       return res.end("Authentication required");
     }
     authenticatedRequests++;
-    const url = decodeURIComponent((req.url ?? "").split("?")[0]);
-    const tarName = url.match(/^\/(.+)\/-\/package.tgz$/)?.[1];
-    if (tarName && packages.has(tarName)) {
-      res.writeHead(200, { "Content-Type": "application/octet-stream" });
-      return res.end(packages.get(tarName)!.tarball);
+    if (held) {
+      pendingResponses.add(res);
+      res.once("close", () => pendingResponses.delete(res));
+      return;
     }
-    const entry = packages.get(url.slice(1));
-    if (!entry) {
+    const url = decodeURIComponent((req.url ?? "").split("?")[0]);
+    const tar = url.match(/^\/(.+)\/-\/([^/]+)\.tgz$/);
+    if (tar) {
+      const entry = packages.get(tar[1] + "@" + tar[2]);
+      if (!entry) {
+        res.writeHead(404);
+        return res.end("{}");
+      }
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      return res.end(entry.tarball);
+    }
+    const entries = [...packages.values()].filter(
+      (entry) => entry.manifest.name === url.slice(1),
+    );
+    if (!entries.length) {
       res.writeHead(404);
       return res.end("{}");
     }
     res.setHeader("Content-Type", "application/json");
     res.end(
       JSON.stringify({
-        name: entry.manifest.name,
-        "dist-tags": { latest: "1.0.0" },
-        versions: {
-          "1.0.0": {
-            ...entry.manifest,
-            dist: {
-              tarball: base + "/" + entry.manifest.name + "/-/package.tgz",
-              integrity: entry.integrity,
+        name: entries[0].manifest.name,
+        "dist-tags": { latest: entries[entries.length - 1].manifest.version },
+        versions: Object.fromEntries(
+          entries.map((entry) => [
+            entry.manifest.version,
+            {
+              ...entry.manifest,
+              dist: {
+                tarball:
+                  base +
+                  "/" +
+                  entry.manifest.name +
+                  "/-/" +
+                  entry.manifest.version +
+                  ".tgz",
+                integrity: entry.integrity,
+              },
             },
-          },
-        },
+          ]),
+        ),
       }),
     );
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) =>
+    server.listen(port, "127.0.0.1", resolve),
+  );
   const address = server.address();
   if (!address || typeof address === "string")
     throw new Error("Registry did not bind");
@@ -224,7 +249,54 @@ export async function registryFixture(root: string) {
   return {
     base,
     config,
+    async publish(
+      manifest: { name: string; version: string; [key: string]: unknown },
+      files: Record<string, string>,
+    ) {
+      const dir = path.join(
+        root,
+        "publish-" +
+          manifest.name.replace(/[^a-z0-9]/gi, "_") +
+          "-" +
+          manifest.version,
+      );
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(
+        path.join(dir, "package.json"),
+        JSON.stringify(manifest),
+      );
+      for (const [file, content] of Object.entries(files)) {
+        await fs.mkdir(path.dirname(path.join(dir, file)), { recursive: true });
+        await fs.writeFile(path.join(dir, file), content);
+      }
+      const packed = await runCommand(
+        "npm",
+        ["pack", "--ignore-scripts", "--json"],
+        dir,
+      );
+      if (packed.code) throw new Error("Fixture npm pack failed");
+      const tarball = await fs.readFile(
+        path.join(dir, JSON.parse(packed.stdout)[0].filename),
+      );
+      packages.set(manifest.name + "@" + manifest.version, {
+        manifest,
+        tarball,
+        integrity:
+          "sha512-" + createHash("sha512").update(tarball).digest("base64"),
+      });
+    },
+    withdraw(name: string, version: string) {
+      packages.delete(name + "@" + version);
+    },
+    hold: () => {
+      held = true;
+    },
+    pendingRequests: () => pendingResponses.size,
     requests: () => authenticatedRequests,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
   };
 }

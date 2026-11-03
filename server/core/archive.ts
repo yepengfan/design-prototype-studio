@@ -1,4 +1,5 @@
 import AdmZip from "adm-zip";
+import { inflateRawSync, crc32 } from "node:zlib";
 import path from "node:path";
 import { Project, Node, SyntaxKind, type Expression } from "ts-morph";
 import {
@@ -43,12 +44,34 @@ export function readArchive(buffer: Buffer): Files {
         "Archives containing symbolic links cannot be imported.",
       );
     if (entry.isDirectory) continue;
-    bytes += entry.header.size;
-    if (bytes > 40_000_000 || entry.header.size > 4_000_000)
+    if (bytes + entry.header.size > 40_000_000 || entry.header.size > 4_000_000)
       throw new StudioError("Expanded archive exceeds the source size limit.");
     if (name in files)
       throw new StudioError("Archive contains duplicate file paths.");
-    const data = entry.getData();
+    if (entry.header.flags & 1 || ![0, 8].includes(entry.header.method))
+      throw new StudioError(
+        "Encrypted or unsupported archive compression is not supported.",
+      );
+    let data: Buffer;
+    try {
+      const compressed = entry.getCompressedData();
+      data =
+        entry.header.method === 0
+          ? compressed
+          : inflateRawSync(compressed, { maxOutputLength: 4_000_001 });
+    } catch {
+      throw new StudioError(
+        "Archive data is invalid or exceeds the source size limit.",
+      );
+    }
+    bytes += data.byteLength;
+    if (
+      data.byteLength > 4_000_000 ||
+      bytes > 40_000_000 ||
+      data.byteLength !== entry.header.size ||
+      crc32(data) !== entry.header.crc
+    )
+      throw new StudioError("Archive size or checksum is invalid.");
     files[name] = encodeFile(name, data);
   }
   validateFiles(files);
@@ -69,7 +92,10 @@ export function inspectImport(files: Files, suppliedRequirements: Files = {}) {
     return {
       files,
       manifest,
-      diagnostics: closureDiagnostics(files),
+      diagnostics: [
+        ...closureDiagnostics(files),
+        ...dependencyDiagnostics(files, manifest),
+      ],
       native: true,
     };
   }
@@ -81,21 +107,7 @@ export function inspectImport(files: Files, suppliedRequirements: Files = {}) {
     );
   const pkg = JSON.parse(files["package.json"] ?? "{}");
   const diagnostics = closureDiagnostics(files);
-  for (const [name, version] of Object.entries({
-    ...pkg.dependencies,
-    ...pkg.devDependencies,
-  }))
-    if (
-      typeof version !== "string" ||
-      !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(version)
-    )
-      diagnostics.push(
-        `${name} needs an exact published npm version. Local, portal, git and ranged dependencies cannot be restored reproducibly.`,
-      );
-  if (!files["package-lock.json"])
-    diagnostics.push(
-      "Supply a matching npm lockfile with the complete dependency closure.",
-    );
+  diagnostics.push(...dependencyDiagnostics(files));
   if (!files[".storybook/main.ts"] && !files[".storybook/main.js"])
     diagnostics.push("The Storybook configuration is missing.");
   const pages: Manifest["pages"] = [];
@@ -178,9 +190,11 @@ export function inspectImport(files: Files, suppliedRequirements: Files = {}) {
         (Node.isSatisfiesExpression(init) || Node.isAsExpression(init))
       )
         init = init.getExpression();
-      if (init && Node.isObjectLiteralExpression(init))
+      if (init && Node.isObjectLiteralExpression(init)) {
         stories.push({ file: name, name: variable.getName(), page: pageId });
-      else
+        const target = pages.find((page) => page.id === pageId)!;
+        target.previewStory ??= name + "#" + variable.getName();
+      } else
         diagnostics.push(
           `${name}: exported story ${variable.getName()} is not a supported CSF object.`,
         );
@@ -196,6 +210,7 @@ export function inspectImport(files: Files, suppliedRequirements: Files = {}) {
     schemaVersion: 1,
     generationState: "generated",
     name: pkg.name ?? "Imported prototype",
+    sourceOrigin: "legacy",
     pages,
     scope: features,
     libraries: [],
@@ -203,6 +218,40 @@ export function inspectImport(files: Files, suppliedRequirements: Files = {}) {
     styles: [],
   };
   return { files, manifest, diagnostics, native: false, stories, requirements };
+}
+function dependencyDiagnostics(files: Files, manifest?: Manifest) {
+  const diagnostics: string[] = [];
+  const pkg = JSON.parse(files["package.json"] ?? "{}");
+  const dependencies = { ...pkg.dependencies, ...pkg.devDependencies };
+  for (const [name, version] of Object.entries(dependencies))
+    if (
+      typeof version !== "string" ||
+      !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(version)
+    )
+      diagnostics.push(
+        `${name} needs an exact published npm version. Local, portal, git and ranged dependencies cannot be restored reproducibly.`,
+      );
+  if (!files["package-lock.json"])
+    diagnostics.push(
+      "Supply a matching npm lockfile with the complete dependency closure.",
+    );
+  for (const library of manifest?.libraries ?? []) {
+    if (dependencies[library.name] !== library.version)
+      diagnostics.push(
+        `${library.name}: the admitted release differs from the project's exact dependency.`,
+      );
+    if (
+      library.components.some(
+        (component) =>
+          component.package !== library.name ||
+          component.version !== library.version,
+      )
+    )
+      diagnostics.push(
+        `${library.name}: component identities do not match this pinned release.`,
+      );
+  }
+  return diagnostics;
 }
 export function resolveLocal(files: Files, from: string, specifier: string) {
   const base = path.posix.normalize(

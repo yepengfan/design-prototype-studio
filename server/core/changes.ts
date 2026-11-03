@@ -1,4 +1,5 @@
-import { Project, Node } from "ts-morph";
+import { Project, Node, ts } from "ts-morph";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   StudioError,
@@ -6,10 +7,13 @@ import {
   type Manifest,
   type Proposal,
   type Snapshot,
+  type Component,
+  type Property,
 } from "./contracts.js";
 import { validateFiles, digest, safeRelative } from "./files.js";
 import { parseRequirements } from "./requirements.js";
 import { synchronizeRuntime } from "./project.js";
+import { anchors } from "./source.js";
 import { closureDiagnostics } from "./archive.js";
 
 export const differences = (before: Files, after: Files) =>
@@ -22,13 +26,167 @@ export const differences = (before: Files, after: Files) =>
       after: after[file] ?? "",
       removed: !(file in after),
     }));
-function withoutPresentation(source: string) {
+// Compare syntax and literal values, not source spelling. Comments, quote choice and
+// indentation carry no business meaning; whitespace inside strings still does.
+function withoutPresentation(source: string, components: Component[]) {
   const p = new Project({ useInMemoryFileSystem: true });
   const f = p.createSourceFile("page.tsx", source);
-  for (const a of f.getDescendants().filter(Node.isJsxAttribute).reverse())
-    if (["style", "className"].includes(a.getNameNode().getText())) a.remove();
-  f.formatText();
-  return f.getFullText();
+  const literal = (node: ts.Node): boolean => {
+    if (
+      ts.isStringLiteralLike(node) ||
+      ts.isNumericLiteral(node) ||
+      [
+        ts.SyntaxKind.TrueKeyword,
+        ts.SyntaxKind.FalseKeyword,
+        ts.SyntaxKind.NullKeyword,
+      ].includes(node.kind)
+    )
+      return true;
+    if (ts.isPrefixUnaryExpression(node)) return literal(node.operand);
+    if (ts.isObjectLiteralExpression(node))
+      return node.properties.every(
+        (property) =>
+          ts.isPropertyAssignment(property) &&
+          (ts.isIdentifier(property.name) ||
+            ts.isStringLiteral(property.name) ||
+            ts.isNumericLiteral(property.name)) &&
+          literal(property.initializer),
+      );
+    return false;
+  };
+  const componentAt = new Map(
+    anchors(source, components)
+      .filter((node) => node.component)
+      .map((node) => [node.start, node.component!]),
+  );
+  const cssModules = new Set(
+    f
+      .getImportDeclarations()
+      .filter((declaration) =>
+        /\.module\.css$/.test(declaration.getModuleSpecifierValue()),
+      )
+      .map((declaration) => declaration.getDefaultImport()?.getText())
+      .filter((name): name is string => !!name),
+  );
+  const hasBusiness = (property: Property): boolean =>
+    property.business || Object.values(property.fields ?? {}).some(hasBusiness);
+  for (const a of f.getDescendants().filter(Node.isJsxAttribute).reverse()) {
+    const name = a.getNameNode().getText();
+    const owner = a
+      .getAncestors()
+      .find(
+        (node) =>
+          Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node),
+      );
+    const prop = owner
+      ? componentAt.get(owner.getStart())?.props[name]
+      : undefined;
+    if (!["style", "className"].includes(name) && (!prop || hasBusiness(prop)))
+      continue;
+    const initializer = a.getInitializer();
+    const expression =
+      initializer && Node.isJsxExpression(initializer)
+        ? initializer.getExpression()
+        : initializer;
+    const cssClass =
+      name === "className" &&
+      expression &&
+      Node.isPropertyAccessExpression(expression) &&
+      Node.isIdentifier(expression.getExpression()) &&
+      cssModules.has(expression.getExpression().getText());
+    if (
+      (expression && literal(expression.compilerNode)) ||
+      cssClass ||
+      (!initializer && prop?.type === "boolean")
+    )
+      a.remove();
+  }
+  for (const declaration of f.getImportDeclarations()) {
+    if (!/\.css$/.test(declaration.getModuleSpecifierValue())) continue;
+    const binding = declaration.getDefaultImport();
+    if (
+      !binding &&
+      !declaration.getNamedImports().length &&
+      !declaration.getNamespaceImport()
+    )
+      declaration.remove();
+    else if (
+      binding &&
+      cssModules.has(binding.getText()) &&
+      !f
+        .getDescendants()
+        .filter(Node.isIdentifier)
+        .some(
+          (identifier) =>
+            identifier.getText() === binding.getText() &&
+            !identifier.getAncestors().some(Node.isImportDeclaration),
+        )
+    )
+      declaration.remove();
+  }
+  const fingerprint = (node: ts.Node): unknown => {
+    if (
+      ts.isStringLiteralLike(node) ||
+      ts.isIdentifier(node) ||
+      ts.isNumericLiteral(node) ||
+      ts.isJsxText(node)
+    )
+      return [node.kind, node.text];
+    const children: unknown[] = [];
+    ts.forEachChild(node, (child) => {
+      children.push(fingerprint(child));
+    });
+    return [node.kind, children];
+  };
+  return JSON.stringify(fingerprint(f.compilerNode));
+}
+function isExecutionConfiguration(file: string) {
+  return (
+    /(^|\/)(?:[^/]*\.config\.[cm]?[jt]s|tsconfig[^/]*\.json)$/.test(file) ||
+    /^(?:scripts|bin|tests)\//.test(file) ||
+    /^\.storybook\/main\.[cm]?[jt]s$/.test(file) ||
+    ["package.json", "package-lock.json", "index.html"].includes(file)
+  );
+}
+// Freeze configuration's local dependency closure too. An imported helper runs
+// with the Node process's privileges just like the top-level configuration.
+function executionClosure(files: Files) {
+  const frozen = new Set(Object.keys(files).filter(isExecutionConfiguration));
+  const pending = [...frozen];
+  const p = new Project({ useInMemoryFileSystem: true });
+  while (pending.length) {
+    const name = pending.pop()!;
+    if (!/\.[cm]?[jt]sx?$/.test(name)) continue;
+    const f = p.createSourceFile(name, files[name], { overwrite: true });
+    for (const node of f.getDescendants()) {
+      if (!Node.isStringLiteral(node)) continue;
+      const spec = node.getLiteralValue();
+      // Also protects static require/dynamic import targets. Conservative string
+      // references are intentional for configuration, which AI cannot author.
+      if (!spec.startsWith(".")) continue;
+      const resolved = path.posix.normalize(
+        path.posix.join(path.posix.dirname(name), spec),
+      );
+      const dependency = [
+        resolved,
+        ...[
+          ".ts",
+          ".tsx",
+          ".js",
+          ".mjs",
+          ".cjs",
+          ".json",
+          "/index.ts",
+          "/index.js",
+        ].map((extension) => resolved + extension),
+      ].find((candidate) => candidate in files);
+      if (dependency && !frozen.has(dependency)) {
+        frozen.add(dependency);
+        pending.push(dependency);
+      }
+    }
+  }
+  return frozen;
 }
 export function materializeProposal(base: Snapshot, proposal: Proposal): Files {
   const files = { ...base.files, ...proposal.files };
@@ -41,6 +199,7 @@ export function prepareChange(
   base: Snapshot,
   proposal: Proposal,
   approvedScope = base.manifest.scope,
+  options: { repair?: boolean; page?: string } = {},
 ) {
   if (["gap", "clarification"].includes(proposal.kind))
     throw new StudioError(proposal.summary, 422, proposal.questions);
@@ -48,6 +207,10 @@ export function prepareChange(
   const manifest: Manifest = structuredClone(
     proposal.manifest ?? { ...base.manifest, ...proposal.manifestChanges },
   );
+  if (manifest.sourceOrigin !== base.manifest.sourceOrigin)
+    throw new StudioError(
+      "An edit cannot change the source import compatibility contract.",
+    );
   if (
     JSON.stringify(manifest.libraries) !==
     JSON.stringify(base.manifest.libraries)
@@ -55,35 +218,137 @@ export function prepareChange(
     throw new StudioError(
       "Import or upgrade libraries through the library review flow before using them in a proposal.",
     );
-  for (const name of ["package.json", "package-lock.json"])
-    if (
-      (name in proposal.files && proposal.files[name] !== base.files[name]) ||
-      proposal.deleted?.includes(name)
-    )
+  const proposedFiles = materializeProposal(base, proposal);
+  const frozen = executionClosure(base.files);
+  for (const change of differences(base.files, proposedFiles))
+    if (frozen.has(change.file) || isExecutionConfiguration(change.file))
       throw new StudioError(
-        "A proposal cannot change dependency versions or project commands. Review library changes separately.",
+        "A proposal cannot change executable configuration, its helpers, dependency versions or project commands. Review configuration and library changes separately.",
       );
   if (JSON.stringify(manifest.scope) !== JSON.stringify(approvedScope))
     throw new StudioError(
       "Choose the working requirements scope before generating a proposal.",
     );
-  const files = synchronizeRuntime(
-    materializeProposal(base, proposal),
-    manifest,
-  );
+  const files = synchronizeRuntime(proposedFiles, manifest);
   const diff = differences(base.files, files);
   const requirementsDiff = diff.filter((d) => d.file.endsWith(".feature"));
   const scopeBefore = parseRequirements(base.files, base.manifest.scope);
   const scopeAfter = parseRequirements(files, manifest.scope);
+  const selectedFiles = new Set(
+    [...scopeBefore.files, ...scopeAfter.files].map((file) => file.file),
+  );
+  if (requirementsDiff.some((change) => !selectedFiles.has(change.file)))
+    throw new StudioError(
+      "A proposal changes requirements outside the selected working scope. Choose that scope before changing its business behavior.",
+      422,
+    );
+  const selectedScenarios = new Set(
+    [...scopeBefore.scenarios, ...scopeAfter.scenarios].map(
+      (scenario) => scenario.id,
+    ),
+  );
+  for (const binding of base.manifest.scenarios.filter(
+    (binding) => !selectedScenarios.has(binding.scenario),
+  ))
+    if (
+      JSON.stringify(
+        manifest.scenarios.find(
+          (candidate) => candidate.scenario === binding.scenario,
+        ),
+      ) !== JSON.stringify(binding)
+    )
+      throw new StudioError(
+        "Preserve scenario mappings outside the selected working scope.",
+        422,
+      );
   const behavior = diff.some((d) => {
     if (d.file === "studio.project.json")
-      return JSON.stringify(base.manifest) !== JSON.stringify(manifest);
+      return (
+        JSON.stringify({ ...base.manifest, scenarios: [] }) !==
+        JSON.stringify({ ...manifest, scenarios: [] })
+      );
     if (/\.tsx?$/.test(d.file) && d.before && d.after)
-      return withoutPresentation(d.before) !== withoutPresentation(d.after);
+      return (
+        withoutPresentation(
+          d.before,
+          base.manifest.libraries.flatMap((library) => library.components),
+        ) !==
+        withoutPresentation(
+          d.after,
+          manifest.libraries.flatMap((library) => library.components),
+        )
+      );
     return !/\.(css|svg|png|jpg|woff2?)$/.test(d.file);
   });
-  const initialImplementation = base.manifest.generationState === "unstarted";
-  if (behavior && !requirementsDiff.length && !initialImplementation)
+  if (
+    behavior &&
+    base.manifest.pages.some(
+      (page) =>
+        diff.some((change) => change.file === page.file) &&
+        base.manifest.scenarios.some(
+          (binding) =>
+            binding.page === page.id &&
+            !selectedScenarios.has(binding.scenario),
+        ),
+    )
+  )
+    throw new StudioError(
+      "This page also implements requirements outside the current selection. Include its related requirement files before changing its behavior, or leave this proposal pending.",
+      422,
+    );
+  if (
+    !behavior &&
+    options.page &&
+    diff.some((change) =>
+      base.manifest.pages.some(
+        (page) => page.id !== options.page && page.file === change.file,
+      ),
+    )
+  )
+    throw new StudioError(
+      "This presentation proposal edits another page. Rework it for the designer's current page.",
+      422,
+    );
+  const initialImplementation =
+    base.manifest.generationState === "unstarted" ||
+    (base.manifest.sourceOrigin !== "legacy" &&
+      base.manifest.scenarios.length > 0 &&
+      scopeBefore.scenarios.some(
+        (scenario) =>
+          !base.manifest.scenarios.some(
+            (binding) => binding.scenario === scenario.id,
+          ),
+      ));
+  if (initialImplementation && !requirementsDiff.length)
+    for (const binding of base.manifest.scenarios.filter((binding) =>
+      selectedScenarios.has(binding.scenario),
+    ))
+      if (
+        JSON.stringify({
+          ...manifest.scenarios.find(
+            (candidate) => candidate.scenario === binding.scenario,
+          ),
+          accepted: false,
+        }) !== JSON.stringify({ ...binding, accepted: false })
+      )
+        throw new StudioError(
+          "Keep the existing scenario checks while implementing the remaining selected scenarios.",
+          422,
+        );
+  if (
+    options.repair &&
+    (requirementsDiff.length ||
+      JSON.stringify(manifest) !== JSON.stringify(base.manifest))
+  )
+    throw new StudioError(
+      "Implementation repair must preserve the existing requirements and reviewed scenario plans exactly.",
+    );
+  if (
+    behavior &&
+    !requirementsDiff.length &&
+    !initialImplementation &&
+    !options.repair
+  )
     throw new StudioError(
       "This proposal changes behavior or configuration without a matching requirements difference. Ask Studio to clarify the affected business scenarios and propose their Gherkin changes.",
       422,
@@ -92,9 +357,10 @@ export function prepareChange(
     throw new StudioError(
       "The selected requirements cannot be removed implicitly.",
     );
-  if (behavior) {
+  if (behavior && !options.repair) {
     manifest.generationState = "generated";
-    for (const binding of manifest.scenarios) binding.accepted = false;
+    for (const binding of manifest.scenarios)
+      if (selectedScenarios.has(binding.scenario)) binding.accepted = false;
   }
   const closure = closureDiagnostics(files);
   if (closure.length)
@@ -132,10 +398,59 @@ export function prepareChange(
         const tag = (Node.isJsxElement(n) ? n.getOpeningElement() : n)
           .getTagNameNode()
           .getText();
-        if (
-          ["button", "input", "select", "textarea", "dialog"].includes(tag) &&
-          !base.files[file]?.includes(n.getText())
-        )
+        const opening = Node.isJsxElement(n) ? n.getOpeningElement() : n;
+        const native = /^[a-z]/.test(tag);
+        const interactiveRoles = new Set([
+          "button",
+          "checkbox",
+          "combobox",
+          "link",
+          "listbox",
+          "menuitem",
+          "option",
+          "radio",
+          "scrollbar",
+          "searchbox",
+          "slider",
+          "spinbutton",
+          "switch",
+          "tab",
+          "textbox",
+          "treeitem",
+        ]);
+        const replacement =
+          native &&
+          ([
+            "button",
+            "input",
+            "select",
+            "textarea",
+            "dialog",
+            "a",
+            "summary",
+            "details",
+          ].includes(tag) ||
+            opening.getAttributes().some((attribute) => {
+              if (Node.isJsxSpreadAttribute(attribute)) return true;
+              if (!Node.isJsxAttribute(attribute)) return false;
+              const name = attribute.getNameNode().getText();
+              if (name === "role") {
+                const initializer = attribute.getInitializer();
+                const role =
+                  initializer && Node.isStringLiteral(initializer)
+                    ? initializer.getLiteralValue()
+                    : undefined;
+                return role === undefined || interactiveRoles.has(role);
+              }
+              // A semantic form owns validation/submission; its controls still
+              // have to come from the admitted library.
+              if (tag === "form" && name === "onSubmit") return false;
+              return (
+                /^on[A-Z]/.test(name) ||
+                ["tabIndex", "contentEditable", "controls"].includes(name)
+              );
+            }));
+        if (replacement && !base.files[file]?.includes(n.getText()))
           throw new StudioError(
             `The proposal invents a ${tag} control. Studio must use the admitted library capability.`,
           );
@@ -149,8 +464,11 @@ export function prepareChange(
     manifest,
     diff: differences(base.files, finalFiles),
     requirementsDiff,
+    behavior,
+    repair: options.repair === true,
     requiresConfirmation:
-      requirementsDiff.length > 0 || (behavior && !initialImplementation),
+      requirementsDiff.length > 0 ||
+      (behavior && !initialImplementation && !options.repair),
     summary: proposal.summary,
     hash: digest(finalFiles),
   };

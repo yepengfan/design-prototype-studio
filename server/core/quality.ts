@@ -13,6 +13,7 @@ export async function checkQuality(
   snapshot: Snapshot,
   previews: Previews,
   screenshots: string,
+  options: { requireReviewed?: boolean } = {},
 ) {
   const scope = parseRequirements(snapshot.files, snapshot.manifest.scope);
   const results: QualityResult[] = [];
@@ -45,16 +46,23 @@ export async function checkQuality(
         },
       ],
     };
-  const browser = await chromium.launch({
-    headless: true,
-    executablePath: process.env.STUDIO_CHROME,
-  });
-  const storybook = await previews.startStorybook(snapshot);
+  let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+  let storybook: Awaited<ReturnType<Previews["startStorybook"]>> | undefined;
   try {
+    browser = await chromium.launch({
+      headless: true,
+      executablePath: process.env.STUDIO_CHROME,
+    });
+    storybook = await previews.startStorybook(snapshot);
     const react = await previews.start(snapshot);
-    const smoke = await browser.newPage();
+    const smoke = await browser.newPage({
+      viewport: { width: 1440, height: 1000 },
+    });
     const smokeErrors: string[] = [];
     smoke.on("pageerror", (error) => smokeErrors.push(error.message));
+    smoke.on("console", (message) => {
+      if (message.type() === "error") smokeErrors.push(message.text());
+    });
     try {
       await smoke.goto(react.url);
       await smoke.locator("#root > *").first().waitFor();
@@ -80,7 +88,7 @@ export async function checkQuality(
         );
         continue;
       }
-      if (!binding.accepted)
+      if (options.requireReviewed !== false && !binding.accepted)
         result.failures.push(
           "Review the scenario-to-test interpretation before marking this scenario complete.",
         );
@@ -144,9 +152,27 @@ export async function checkQuality(
       }
       result.passed = !result.failures.length;
     }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    for (const scenario of scope.scenarios) {
+      let result = results.find((result) => result.scenario === scenario.id);
+      if (!result) {
+        result = {
+          scenario: scenario.id,
+          name: scenario.name,
+          passed: false,
+          failures: [],
+        };
+        results.push(result);
+      }
+      result.passed = false;
+      result.failures.push(
+        "Preview startup or browser check failed: " + reason,
+      );
+    }
   } finally {
-    previews.stop(storybook.id);
-    await browser.close();
+    if (storybook) previews.stop(storybook.id);
+    await browser?.close();
   }
   return {
     ready: results.every((r) => r.passed),
