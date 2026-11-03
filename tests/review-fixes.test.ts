@@ -27,11 +27,10 @@ function render(source: string) {
   new Function("require", "exports", compiled)((name: string) => name === "react" ? React : jsxRuntime, exports);
   return renderToStaticMarkup(createElement(exports.Page));
 }
-it("rejects newly active and duplicated local wrapper invocations at acceptance", async () => {
+it.each([false, true])("rejects newly active and duplicated local wrapper invocations at acceptance (factory: %s)", async (factory) => {
   const root = await fs.mkdtemp(path.join(process.cwd(), ".review-fixes-"));
   try {
     const store = new ProjectStore(root);
-    for (const factory of [false, true]) {
       const legacy = factory ? `return React.createElement('button',null,'Confirm')` : `return <button>Confirm</button>`;
       const invocation = factory ? "React.createElement(Alias)" : "<Alias/>";
       const prefix = `import * as React from 'react';function Legacy(){${legacy}}const Alias=Legacy;function Wrapper(){return ${invocation}}`;
@@ -46,7 +45,6 @@ it("rejects newly active and duplicated local wrapper invocations at acceptance"
         expect((await store.get(accepted.state.id)).state.head).toBe(accepted.snapshot.id);
         expect(() => validateCapabilities({ ...project.files, "src/pages/Page.tsx": source.replace('<main>', '<main style={{padding:24}}>') }, project.manifest, project.files)).not.toThrow();
       }
-    }
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 it("preserves local React provider ownership in both directions and through aliases", () => {

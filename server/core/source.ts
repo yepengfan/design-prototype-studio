@@ -1162,6 +1162,12 @@ function renderOrigin(node: Node, seen = new Set<Node>()): Node | undefined {
 function nativeRenderUses(input: Iterable<SourceFile>, components: Component[]) {
   const files = [...input];
   const calls = new Map<Node, Node[]>();
+  const origins = new Map<Node, Node | undefined>();
+  const resolve = (node: Node) => {
+    if (!origins.has(node)) origins.set(node, renderOrigin(node));
+    return origins.get(node);
+  };
+  const shapes = new Map<Node, unknown[]>();
   const renderShape = (node: Node): unknown[] => {
     if (Node.isCallExpression(node)) {
       const callee = reference(node.getExpression());
@@ -1187,15 +1193,16 @@ function nativeRenderUses(input: Iterable<SourceFile>, components: Component[]) 
     return children.length ? children.flatMap(renderShape) : [node.getKindName(), node.getText()];
   };
   const dependencies = (target: Node | undefined) => {
-    const pending = target ? [renderOrigin(target)] : [];
+    const pending = target ? [resolve(target)] : [];
     const seen = new Set<Node>();
     const result: unknown[] = [];
     while (pending.length) {
       const origin = pending.pop();
       if (!origin || seen.has(origin)) continue;
       seen.add(origin);
-      result.push([origin.getSourceFile().getFilePath(), renderShape(origin)]);
-      for (const identifier of origin.getDescendants().filter(Node.isIdentifier)) pending.push(renderOrigin(identifier));
+      if (!shapes.has(origin)) shapes.set(origin, renderShape(origin));
+      result.push([origin.getSourceFile().getFilePath(), shapes.get(origin)]);
+      for (const identifier of origin.getDescendants().filter(Node.isIdentifier)) pending.push(resolve(identifier));
     }
     return result;
   };
@@ -1217,7 +1224,7 @@ function nativeRenderUses(input: Iterable<SourceFile>, components: Component[]) 
               ["createElement", "default.createElement"].includes(reference(parent.getExpression())!.exported))))) continue;
       target = node;
     }
-    const fn = target && renderOrigin(target);
+    const fn = target && resolve(target);
     if (fn) calls.set(fn, [...(calls.get(fn) ?? []), node]);
   }
   const signature = (call: Node) => {
@@ -1259,6 +1266,26 @@ function nativeRenderUses(input: Iterable<SourceFile>, components: Component[]) 
     }
     return syntax(call);
   };
+  const execution = new Map<Node, unknown[]>();
+  const executionDependencies = (node: Node) => {
+    if (execution.has(node)) return execution.get(node)!;
+    const result = node.getAncestors().flatMap((ancestor) => {
+    let inputs: Node[] = [];
+    if (Node.isConditionalExpression(ancestor)) inputs = [ancestor.getCondition()];
+    else if (Node.isIfStatement(ancestor)) inputs = [ancestor.getExpression()];
+    else if (Node.isBinaryExpression(ancestor) && [SyntaxKind.AmpersandAmpersandToken, SyntaxKind.BarBarToken, SyntaxKind.QuestionQuestionToken].includes(ancestor.getOperatorToken().getKind())) inputs = [ancestor.getLeft()];
+    else if (Node.isCallExpression(ancestor)) {
+      const callee = reference(ancestor.getExpression());
+      inputs = callee?.module === "react" && ["createElement", "default.createElement"].includes(callee.exported) ? ancestor.getArguments().slice(1, 2) : [ancestor];
+    }
+    return inputs.flatMap((input) => [input, ...input.getDescendants()].filter(Node.isIdentifier)
+      .filter((identifier) => !identifier.getAncestors().some((parent) => jsx(parent) && input.getStart() <= parent.getStart() && parent.getEnd() <= input.getEnd()))
+      .flatMap((identifier) => dependencies(identifier)));
+    });
+    execution.set(node, result);
+    return result;
+  };
+  const frames = new Map<Node, unknown[]>();
   const context = (node: Node, seen = new Set<Node>()): unknown[][] => {
     let fn: Node | undefined = node.getAncestors().find((parent) => Node.isVariableDeclaration(parent) || Node.isFunctionDeclaration(parent) || Node.isArrowFunction(parent) || Node.isFunctionExpression(parent) || Node.isMethodDeclaration(parent));
     if (fn && Node.isMethodDeclaration(fn) && Node.isClassDeclaration(fn.getParent())) fn = fn.getParent();
@@ -1271,11 +1298,15 @@ function nativeRenderUses(input: Iterable<SourceFile>, components: Component[]) 
     }
     if (seen.has(fn)) throw new StudioError("Recursive native render-use consumption cannot be preserved safely. Resolve this compatibility gap before acceptance.", 422);
     const next = new Set([...seen, fn]);
-    return calls.get(fn)!.flatMap((call) => context(call, next).map((parents) => [
-      [call.getSourceFile().getFilePath(), lexicalIdentity(call), controlExecutionContext(call, components), signature(call)], ...parents,
-    ]));
+    return calls.get(fn)!.flatMap((call) => {
+      if (!frames.has(call)) frames.set(call, [call.getSourceFile().getFilePath(), lexicalIdentity(call), controlExecutionContext(call, components), signature(call)]);
+      return context(call, next).map((parents) => [[frames.get(call)!, executionDependencies(call)], ...parents]);
+    });
   };
-  return context;
+  return (node: Node) => context(node).map((parents) => {
+    const dependencies = executionDependencies(node);
+    return parents.length || dependencies.length ? [["execution dependencies", dependencies], ...parents] : [];
+  });
 }
 export function validateCapabilities(files: Files, manifest: Manifest, previous: Files | Files[] = files) {
   const project = sourceProject(files);

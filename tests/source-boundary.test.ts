@@ -13,8 +13,7 @@ import { componentSchema, type Component } from "../server/core/contracts";
 import { digest } from "../server/core/files";
 import { inspectLibrary } from "../server/core/libraries";
 
-it("requires all affected requirements for effective global annotations and their transitive helpers", () => {
-  for (const extension of ["tsx", "ts", "jsx", "js"]) {
+it.each(["tsx", "ts", "jsx", "js"])("requires all affected requirements for effective global annotations (%s)", (extension) => {
     const project = blankProject("Global scope");
     for (const file of Object.keys(project.files)) if (file.startsWith(".storybook/preview.")) delete project.files[file];
     project.files[`.storybook/preview.${extension}`] = `import {label} from '../src/setup';export default {parameters:{label}}`;
@@ -36,7 +35,6 @@ it("requires all affected requirements for effective global annotations and thei
     base.manifest.scope = ["requirements"];
     base.files = synchronizeRuntime(base.files, base.manifest);
     expect(() => prepareChange(base, proposal)).not.toThrow();
-  }
 });
 it("tracks unknown value carriers and local slot consumption instead of blessing changed use", () => {
   for (const [before, after] of [
@@ -80,7 +78,7 @@ it("carries unambiguous published decorators into body and named-slot insertion 
   try {
     await write("package.json", JSON.stringify({ name, version: "1.0.0", type: "module", types: "./index.d.ts", exports: { ".": { types: "./index.d.ts", default: "./index.js" } } }));
     await write("index.js", "export const unused=0;");
-    await write("index.d.ts", `export interface NoticeProps {/** Surface tone. */tone?:'quiet'|'bright'}\n/** A contextual notice. */\nexport declare function Notice(props:NoticeProps):any;export declare function Provider(props:{children?:any}):any;`);
+    await write("index.d.ts", `export interface NoticeProps {\n/** Surface tone. */\ntone?:'quiet'|'bright'}\n/** A contextual notice. */\nexport declare function Notice(props:NoticeProps):any;export declare function Provider(props:{children?:any}):any;`);
     await write("Notice.stories.tsx", `import {Notice} from '${name}';export default {component:Notice};export const Default={args:{tone:'quiet'}};`);
     await write(".storybook/preview.tsx", `import {Provider} from '${name}';export default {decorators:[(Story:any)=><Provider><Story/></Provider>]};`);
     const admitted = await inspectLibrary(root, name, "1.0.0");
@@ -111,4 +109,11 @@ it("normalizes factory layout presentation while retaining factory slot consumpt
   const slot = prefix + "function Slot({header}){return h('aside',null,header)}export function Page(){return h(Slot,{header:action})}";
   const baseline = { ...project.files, "src/pages/Page.tsx": slot };
   expect(() => validateCapabilities({ ...baseline, "src/pages/Page.tsx": slot.replace("null,header)", "null,header,header)") }, project.manifest, baseline)).toThrow(/control|preserv/);
+});
+
+it("rejects changed symbol-resolved guard dependencies before preserving a control use", () => {
+  const project = blankProject("Imported guards");
+  project.files["src/enabled.ts"] = "export const enabled=false;";
+  project.files["src/pages/Page.tsx"] = "import {enabled} from '../enabled';const action=<button>Confirm</button>;export function Page(){return <main>{enabled && action}</main>}";
+  expect(() => validateCapabilities({ ...project.files, "src/enabled.ts": "export const enabled=true;" }, project.manifest, project.files)).toThrow(/control|preserv/);
 });
