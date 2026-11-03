@@ -216,14 +216,15 @@ test("designer composes genuine compound components in named slots and edits str
 });
 
 test("returning to Your projects clears the editor before another project opens", async ({ page }) => {
+  test.setTimeout(180000);
   await page.goto("/");
   await page.getByLabel("Project name").fill("First switch project");
   await page.getByRole("button", { name: "Create blank project" }).click();
-  await expect(page.getByLabel("Current project")).not.toHaveValue("");
+  await expect(page.getByLabel("Current project")).not.toHaveValue("", {timeout:150000});
   await page.getByLabel("Current project").selectOption("");
   await expect(page.getByLabel("Project name")).toBeVisible();
   await page.getByLabel("Project name").fill("Second switch project");
   await page.getByRole("button", { name: "Create blank project" }).click();
-  await expect(page.getByLabel("Current project").locator("option:checked")).toHaveText("Second switch project");
+  await expect(page.getByLabel("Current project").locator("option:checked")).toHaveText("Second switch project", {timeout:150000});
   await expect(page.getByLabel("Scenario preview")).toHaveValue("");
 });

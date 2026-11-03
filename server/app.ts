@@ -39,6 +39,15 @@ export async function createApp(options: {
   ai?: Pick<LocalAI, "generate" | "cancel" | "close">;
 }) {
   const app = express();
+  const installationAbort = new AbortController();
+  const installations = new Set<Promise<string>>();
+  const install = async (...args: Parameters<typeof installProject>) => {
+    if (installationAbort.signal.aborted) throw new StudioError("Studio is closing.", 409);
+    const job = installProject(args[0], args[1], args[2], args[3], installationAbort.signal);
+    installations.add(job);
+    try { return await job; }
+    finally { installations.delete(job); }
+  };
   const secret = randomBytes(32).toString("hex");
   const store = new ProjectStore(path.join(options.root, "projects"));
   const previews = new Previews(
@@ -72,7 +81,7 @@ export async function createApp(options: {
       .object({ name: z.string().trim().min(1).max(120) })
       .parse(req.body);
     const p = blankProject(name);
-    p.files["package-lock.json"] = await installProject(
+    p.files["package-lock.json"] = await install(
       path.join(options.root, "admissions", randomUUID()),
       p.files,
     );
@@ -306,7 +315,7 @@ export async function createApp(options: {
       ...libraries,
       { name: body.name, registry: body.registry },
     ];
-    files["package-lock.json"] = await installProject(
+    files["package-lock.json"] = await install(
       root,
       files,
       registries,
@@ -1350,8 +1359,9 @@ export async function createApp(options: {
     store,
     previews,
     close: async () => {
+      installationAbort.abort();
       ai.close();
-      await previews.close();
+      await Promise.allSettled([previews.close(), ...installations]);
     },
   };
 }
