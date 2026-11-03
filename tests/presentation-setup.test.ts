@@ -11,6 +11,7 @@ import { ProjectStore } from "../server/core/store";
 import { anchors, editSource } from "../server/core/source";
 import { componentSchema } from "../server/core/contracts";
 import { digest } from "../server/core/files";
+import { prepareChange } from "../server/core/changes";
 import { inspectLibrary } from "../server/core/libraries";
 
 function render(source: string) {
@@ -26,11 +27,15 @@ it.each(["Caption", '{"Caption"}', "factory"])("preserves consumer presentation 
   const root = await fs.mkdtemp(path.join(process.cwd(), ".consumer-text-"));
   try {
     const project = blankProject("Text");
-    const source = text === "factory" ? `import {createElement as h} from 'react';function Slot({children}){return h('aside',null,h('h2',null,'Caption'),children)}export function Page(){return h(Slot,null,h('button',null,'Confirm'))}` : `function Slot({children}){return <aside><h2>${text}</h2>{children}</aside>}export function Page(){return <Slot><button>Confirm</button></Slot>}`;
+    project.manifest.scope = ["requirements"];
+    project.files["requirements/notice.feature"] = "Feature: Notice\nScenario: Confirm\nGiven a notice exists\nThen confirmation is available\n";
+    const source = text === "factory" ? `import {createElement as h} from 'react';function Slot({children}){return h('aside',null,h('h2',{id:'caption'},'Caption'),children)}export function Page(){return h(Slot,null,h('button',null,'Confirm'))}` : `function Slot({children}){return <aside><h2>${text}</h2>{children}</aside>}export function Page(){return <Slot><button>Confirm</button></Slot>}`;
     project.files["src/pages/Page.tsx"] = source;
     const store = new ProjectStore(root);
     const initial = await store.create(project.manifest, project.files);
     const updated = text === "factory" ? source.replace("'Caption'", "'Updated caption'") : editSource(source, { anchor: anchors(source).find((node) => node.tag === "h2")!.id, sourceHash: digest(source), operation: "text", value: "Updated caption" }, []);
+    const prompt = prepareChange(initial.snapshot, { kind: "presentation", summary: "Caption", files: { "src/pages/Page.tsx": updated }, questions: [], affectedScenarios: [] });
+    expect(prompt.requiresConfirmation).toBe(false);
     const saved = await store.commit(initial.state.id, initial.snapshot.id, { ...project.files, "src/pages/Page.tsx": updated }, project.manifest, "Caption");
     expect(render(saved.snapshot.files["src/pages/Page.tsx"])).toContain("Updated caption");
     expect((render(saved.snapshot.files["src/pages/Page.tsx"]).match(/<button>/g) ?? []).length).toBe(1);

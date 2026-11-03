@@ -257,11 +257,13 @@ function sourceProject(files: Files) {
 function syntax(node: Node) {
   return ts.createPrinter({ removeComments: true }).printNode(ts.EmitHint.Unspecified, node.compilerNode, node.getSourceFile().compilerNode);
 }
+function behaviorProperty(name: string) {
+  return /^on[A-Z]/.test(name) || ["role", "aria-live", "hidden", "inert", "disabled", "ref", "form", "required", "name"].includes(name);
+}
 function behaviorAttributes(element: Element) {
   return opening(element).getAttributes().some((attribute) =>
     Node.isJsxSpreadAttribute(attribute) || (Node.isJsxAttribute(attribute) &&
-      (/^on[A-Z]/.test(attribute.getNameNode().getText()) ||
-        ["role", "aria-live", "hidden", "inert", "disabled", "ref", "form", "required", "name"].includes(attribute.getNameNode().getText()))));
+      behaviorProperty(attribute.getNameNode().getText())));
 }
 function setupIdentities(components: Component[], provider?: string, files: Files = {}) {
   return new Set([provider, ...components.flatMap((component) => [component.provider, ...(component.setup ?? [])])]
@@ -1166,8 +1168,11 @@ export function presentationText(node: Node) {
   const parent = node.getParent();
   if ((Node.isStringLiteral(node) || Node.isNumericLiteral(node)) && Node.isCallExpression(parent) && parent.getArguments().indexOf(node) >= 2) {
     const callee = reference(parent.getExpression());
-    const target = parent.getArguments()[0];
-    return callee?.module === "react" && ["createElement", "default.createElement"].includes(callee.exported) && !!target && Node.isStringLiteral(target) && /^(?:h[1-6]|p|span|small|strong|em|div|section|article|aside|main|header|footer)$/.test(target.getLiteralValue()) && !factoryContext(parent, []).length;
+    const [target, props] = parent.getArguments();
+    const behavior = props && props.getKind() !== SyntaxKind.NullKeyword && props.getText() !== "undefined" &&
+      (!Node.isObjectLiteralExpression(props) || props.getProperties().some((property) =>
+        Node.isSpreadAssignment(property) || Node.isComputedPropertyName(property.getNameNode()) || behaviorProperty(property.getName().replace(/^["']|["']$/g, ""))));
+    return callee?.module === "react" && ["createElement", "default.createElement"].includes(callee.exported) && !!target && Node.isStringLiteral(target) && /^(?:h[1-6]|p|span|small|strong|em|div|section|article|aside|main|header|footer)$/.test(target.getLiteralValue()) && !behavior;
   }
   return false;
 }
