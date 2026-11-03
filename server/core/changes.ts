@@ -14,6 +14,7 @@ import { validateFiles, digest, safeRelative } from "./files.js";
 import { parseRequirements } from "./requirements.js";
 import { synchronizeRuntime } from "./project.js";
 import { anchors, validateCapabilities, localSourceClosure } from "./source.js";
+import { effectiveStorybookPreview } from "./providers.js";
 import { closureDiagnostics } from "./archive.js";
 
 export const differences = (before: Files, after: Files) =>
@@ -287,16 +288,17 @@ export function prepareChange(
       );
     return !/\.(css|svg|png|jpg|woff2?)$/.test(d.file);
   });
-  const pageRoots = (manifest: Manifest, page: Manifest["pages"][number]) => [
+  const pageRoots = (files: Files, manifest: Manifest, page: Manifest["pages"][number]) => [
     page.file,
+    ...(effectiveStorybookPreview(files) ? [effectiveStorybookPreview(files)!] : []),
     ...(page.previewStory ? [page.previewStory.split("#")[0]] : []),
     ...manifest.scenarios.filter((binding) => binding.page === page.id).flatMap((binding) => [binding.fixture, binding.story.split("#")[0]]),
     ...(manifest.provider ? [manifest.provider.split("#")[0]] : []),
   ];
   const affectedPages = base.manifest.pages.filter((page) => {
     const dependencies = new Set([
-      ...localSourceClosure(base.files, pageRoots(base.manifest, page)),
-      ...localSourceClosure(files, pageRoots(manifest, manifest.pages.find((candidate) => candidate.id === page.id) ?? page)),
+      ...localSourceClosure(base.files, pageRoots(base.files, base.manifest, page)),
+      ...localSourceClosure(files, pageRoots(files, manifest, manifest.pages.find((candidate) => candidate.id === page.id) ?? page)),
     ]);
     return JSON.stringify(page) !== JSON.stringify(manifest.pages.find((candidate) => candidate.id === page.id)) ||
       base.manifest.provider !== manifest.provider ||

@@ -15,7 +15,7 @@ import { chromium } from "@playwright/test";
 import { DependencyCache } from "./dependencies.js";
 import { stopChild, runCommand } from "./process.js";
 import { componentReference } from "./component-reference.js";
-import { providerSetup, projectSpecifier } from "./providers.js";
+import { providerSetup, projectSpecifier, effectiveStorybookPreview } from "./providers.js";
 import { validateCapabilities } from "./source.js";
 import { writeFiles } from "./files.js";
 
@@ -220,7 +220,7 @@ export class Previews {
             content = `<State${i}_${j} />`;
           }
           examples.push(
-            `<section aria-label=${JSON.stringify(component.package + "/" + component.name + "/" + example.name)} key=${JSON.stringify(i + "-" + j)}><h2>{${JSON.stringify(component.name + " · " + example.name)}}</h2>${provider.wrap(content)}</section>`,
+            `<section aria-label=${JSON.stringify(component.package + "/" + component.name + "/" + example.name)} key=${JSON.stringify(i + "-" + j)}><h2>{${JSON.stringify(component.name + " · " + example.name)}}</h2>${example.story ? content : provider.wrap(content)}</section>`,
           );
         });
       });
@@ -232,6 +232,7 @@ export class Previews {
     } else if (componentPreview) {
       const reference = componentReference(componentPreview.export);
       if (componentPreview.story) {
+        composed = true;
         const story = componentPreview.story;
         launcher = `import {composeStories,setProjectAnnotations} from '@storybook/react-vite';
 import * as states from ${JSON.stringify("./node_modules/" + componentPreview.package + "/" + story.file.replace(/\.[tj]sx?$/, ""))};
@@ -259,12 +260,7 @@ const Page=composeStories(states)[${JSON.stringify(story.export)}];`;
           throw new StudioError(
             "This preview needs its matching original Storybook story.",
           );
-        const previewConfig = [
-          ".storybook/preview.tsx",
-          ".storybook/preview.ts",
-          ".storybook/preview.jsx",
-          ".storybook/preview.js",
-        ].find((file) => snapshot.files[file]);
+        const previewConfig = effectiveStorybookPreview(snapshot.files);
         launcher = `import { composeStories, setProjectAnnotations } from '@storybook/react-vite';
 import * as stories from ${JSON.stringify("./" + file.replace(/\.[tj]sx?$/, ""))};
 ${previewConfig ? `import * as annotations from ${JSON.stringify("./" + previewConfig.replace(/\.[tj]sx?$/, ""))}; setProjectAnnotations(annotations);` : ""}
@@ -276,7 +272,7 @@ const Page = composeStories(stories)[${JSON.stringify(story)}];
       }
     }
     const provider = providerSetup(
-      componentPreview?.provider ??
+      (componentPreview?.story ? undefined : componentPreview?.provider) ??
         (composed ? undefined : snapshot.manifest.provider),
       "./",
     );

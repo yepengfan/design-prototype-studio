@@ -1,4 +1,4 @@
-import { StudioError } from "./contracts.js";
+import { StudioError, type Files } from "./contracts.js";
 import { safeRelative } from "./files.js";
 export function projectSpecifier(module: string, localPrefix: string) {
   if (module.startsWith("/") || module.includes("..") || module.includes("\\"))
@@ -31,4 +31,8 @@ export function providerSetup(
     imports: `import { ${exported} as ${alias} } from ${JSON.stringify(specifier)};\n`,
     wrap: (child: string) => `<${alias}>${child}</${alias}>`,
   };
+}
+
+export function effectiveStorybookPreview(files: Files) {
+  return [".storybook/preview.tsx", ".storybook/preview.ts", ".storybook/preview.jsx", ".storybook/preview.js"].find((name) => name in files);
 }

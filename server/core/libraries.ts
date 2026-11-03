@@ -352,6 +352,8 @@ export async function inspectLibrary(
           examples,
           requiresBehavior: unsupportedRequired,
           setup: stories.get(symbolName)?.setup ?? [],
+          provider: stories.get(symbolName)?.provider,
+          insertionGap: stories.get(symbolName)?.insertionGap,
         }),
       );
     }

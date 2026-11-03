@@ -8,7 +8,7 @@ import {
   type SourceFile,
 } from "ts-morph";
 import { resolveLocal } from "./archive.js";
-import { providerSetup } from "./providers.js";
+import { providerSetup, effectiveStorybookPreview } from "./providers.js";
 import { componentReference } from "./component-reference.js";
 import { digest } from "./files.js";
 import { StudioError, type Component, type Property, type Files, type Manifest } from "./contracts.js";
@@ -605,6 +605,7 @@ function editSourceUnchecked(
         "This component needs required business configuration. Use a prompt with complete requirements.",
         422,
       );
+    if (c.insertionGap) throw new StudioError(c.insertionGap, 422);
     const reference = componentReference(c.export);
     let local: string;
     const declaration = file
@@ -1007,7 +1008,8 @@ function localSpecifiers(file: SourceFile) {
 }
 function sourceClosure(project: Project, files: Files, manifest: Manifest) {
   const roots = [
-    ...Object.keys(files).filter((name) => name.startsWith("src/") || /\.stories\.[cm]?[jt]sx?$/.test(name) || /^\.storybook\/preview\.[cm]?[jt]sx?$/.test(name)),
+    ...Object.keys(files).filter((name) => name.startsWith("src/") || /\.stories\.[cm]?[jt]sx?$/.test(name)),
+    ...(effectiveStorybookPreview(files) ? [effectiveStorybookPreview(files)!] : []),
     ...manifest.pages.flatMap((page) => [page.file, ...(page.previewStory ? [page.previewStory.split("#")[0]] : [])]),
     ...manifest.scenarios.flatMap((scenario) => [scenario.fixture, scenario.story.split("#")[0]]),
     ...(manifest.provider ? [manifest.provider.split("#")[0]] : []),
@@ -1059,7 +1061,33 @@ function lexicalIdentity(node: Node) {
 // Preserve a legacy control only while its statically visible execution context
 // remains unchanged. Changed or ambiguous runtime context requires a library-backed
 // implementation; this deliberately does not evaluate arbitrary JavaScript.
-function controlExecutionContext(node: Node) {
+function presentationAttribute(op: ReturnType<typeof opening>, attribute: Node, components: Component[]) {
+  if (!Node.isJsxAttribute(attribute)) return false;
+  const initializer = attribute.getInitializer();
+  const expression = initializer && Node.isJsxExpression(initializer) ? initializer.getExpression() : initializer;
+  if (initializer && literalValue(expression) === undefined) return false;
+  const name = attribute.getNameNode().getText();
+  if (["style", "className"].includes(name)) return true;
+  const origin = reference(op.getTagNameNode());
+  const property = components.find((component) => component.package === origin?.module && component.export === origin.exported)?.props[name];
+  const visual = (property: Property): boolean => !property.business && Object.values(property.fields ?? {}).every(visual);
+  return !!property && visual(property);
+}
+function factoryContext(call: import("ts-morph").CallExpression, components: Component[]) {
+  const [target, props] = call.getArguments();
+  const origin = target && reference(target);
+  const component = components.find((component) => component.package === origin?.module && component.export === origin.exported);
+  const visual = (property: Property): boolean => !property.business && Object.values(property.fields ?? {}).every(visual);
+  if (!props || props.getKind() === SyntaxKind.NullKeyword || props.getText() === "undefined") return [];
+  if (!Node.isObjectLiteralExpression(props)) return [syntax(props)];
+  return props.getProperties().filter((property) => {
+    if (!Node.isPropertyAssignment(property)) return true;
+    const name = property.getName().replace(/^["']|["']$/g, "");
+    return literalValue(property.getInitializer()) === undefined ||
+      (!["style", "className"].includes(name) && (!component?.props[name] || !visual(component.props[name])));
+  }).map(syntax);
+}
+function controlExecutionContext(node: Node, components: Component[] = []) {
   const file = node.getSourceFile();
   const factories = new Set(file.getDescendants().filter(Node.isCallExpression).filter((call) => {
     const target = reference(call.getExpression());
@@ -1080,12 +1108,20 @@ function controlExecutionContext(node: Node) {
   };
   const functions = node.getAncestors().filter((parent) => Node.isFunctionDeclaration(parent) || Node.isArrowFunction(parent) || Node.isFunctionExpression(parent) || Node.isMethodDeclaration(parent) || Node.isClassDeclaration(parent));
   const guards = node.getAncestors().flatMap((parent) => {
-    if (Node.isCallExpression(parent)) return [runtimeSyntax(parent)];
+    if (Node.isCallExpression(parent)) {
+      const callee = reference(parent.getExpression());
+      if (callee?.module === "react" && ["createElement", "default.createElement"].includes(callee.exported)) {
+        const props = factoryContext(parent, components);
+        const target = parent.getArguments()[0];
+        return props.length || (target && Node.isStringLiteral(target) && ["form", "fieldset", "label"].includes(target.getLiteralValue())) ? [target ? syntax(target) : "missing target", props] : [];
+      }
+      return [runtimeSyntax(parent)];
+    }
     if (Node.isJsxElement(parent) || Node.isJsxAttribute(parent)) {
       const owner = Node.isJsxElement(parent) ? parent.getOpeningElement() : parent.getAncestors().find((ancestor) => Node.isJsxOpeningElement(ancestor) || Node.isJsxSelfClosingElement(ancestor));
       if (Node.isJsxOpeningElement(owner) || Node.isJsxSelfClosingElement(owner)) {
-        const attributes = owner.getAttributes().filter((attribute) => !Node.isJsxAttribute(attribute) || !["style", "className"].includes(attribute.getNameNode().getText()));
-        if (attributes.length) return [owner.getTagNameNode().getText(), ...attributes.map(runtimeSyntax)];
+        const attributes = owner.getAttributes().filter((attribute) => !presentationAttribute(owner, attribute, components));
+        if (attributes.length || ["form", "fieldset", "label"].includes(owner.getTagNameNode().getText())) return [owner.getTagNameNode().getText(), ...attributes.map(runtimeSyntax)];
       }
     }
     if (Node.isConditionalExpression(parent)) return [syntax(parent.getCondition()), node.getStart() < parent.getWhenFalse().getStart() ? "true-branch" : "false-branch"];
@@ -1096,31 +1132,73 @@ function controlExecutionContext(node: Node) {
   });
   return [guards, functions.map(runtimeSyntax), file.getVariableStatements().map(runtimeSyntax)];
 }
-function localFunction(node: Node, seen = new Set<Node>()): Node | undefined {
+function renderOrigin(node: Node, seen = new Set<Node>()): Node | undefined {
   if (seen.has(node)) return undefined;
   seen.add(node);
   if (Node.isFunctionDeclaration(node) || Node.isArrowFunction(node) || Node.isFunctionExpression(node) || Node.isMethodDeclaration(node) || Node.isClassDeclaration(node)) return node;
-  if (Node.isParenthesizedExpression(node) || Node.isAsExpression(node) || Node.isSatisfiesExpression(node)) return localFunction(node.getExpression(), seen);
+  if (Node.isParenthesizedExpression(node) || Node.isAsExpression(node) || Node.isSatisfiesExpression(node)) return renderOrigin(node.getExpression(), seen);
   if (Node.isVariableDeclaration(node) || Node.isExportAssignment(node)) {
     const input = Node.isVariableDeclaration(node) ? node.getInitializer() : node.getExpression();
-    return input && localFunction(input, seen);
+    if (!input) return undefined;
+    if (Node.isVariableDeclaration(node) && !Node.isIdentifier(input) && !Node.isPropertyAccessExpression(input) && !Node.isArrowFunction(input) && !Node.isFunctionExpression(input)) return node;
+    return renderOrigin(input, seen);
   }
   if (Node.isCallExpression(node)) {
     const callee = reference(node.getExpression());
     if (callee?.module === "react" && ["memo", "forwardRef", "default.memo", "default.forwardRef"].includes(callee.exported)) {
       const input = node.getArguments()[0];
-      return input && localFunction(input, seen);
+      return input && renderOrigin(input, seen);
     }
   }
-  const symbol = node.getSymbol();
+  if (Node.isBindingElement(node)) return node.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
+  const parent = node.getParent();
+  const symbol = Node.isShorthandPropertyAssignment(parent) ? parent.getValueSymbol() : node.getSymbol();
   for (const declaration of (symbol?.getAliasedSymbol() ?? symbol)?.getDeclarations() ?? []) {
-    const found = localFunction(declaration, seen);
+    const found = renderOrigin(declaration, seen);
     if (found) return found;
   }
   return undefined;
 }
-function invocationContexts(files: Iterable<SourceFile>) {
+function nativeRenderUses(input: Iterable<SourceFile>, components: Component[]) {
+  const files = [...input];
   const calls = new Map<Node, Node[]>();
+  const renderShape = (node: Node): unknown[] => {
+    if (Node.isCallExpression(node)) {
+      const callee = reference(node.getExpression());
+      if (callee?.module === "react" && ["createElement", "default.createElement"].includes(callee.exported)) {
+        const [target, , ...values] = node.getArguments();
+        const props = factoryContext(node, components);
+        const children = values.flatMap(renderShape);
+        if (target && Node.isStringLiteral(target) && ["main", "div", "section", "article", "aside", "span"].includes(target.getLiteralValue()) && !props.length) return children;
+        return ["element", target ? syntax(target) : "missing target", props, children];
+      }
+    }
+    if (Node.isJsxFragment(node)) return node.getJsxChildren().flatMap(renderShape);
+    if (Node.isJsxExpression(node)) return node.getExpression() ? renderShape(node.getExpression()!) : [];
+    if (Node.isJsxText(node)) return node.getText().trim() ? [node.getText().trim()] : [];
+    if (jsx(node)) {
+      const op = opening(node);
+      const props = op.getAttributes().filter((attribute) => !presentationAttribute(op, attribute, components));
+      const children = Node.isJsxElement(node) ? node.getJsxChildren().flatMap(renderShape) : [];
+      if (["main", "div", "section", "article", "aside", "span"].includes(op.getTagNameNode().getText()) && !props.length) return children;
+      return ["element", op.getTagNameNode().getText(), props.flatMap(renderShape), children];
+    }
+    const children = node.getChildren();
+    return children.length ? children.flatMap(renderShape) : [node.getKindName(), node.getText()];
+  };
+  const dependencies = (target: Node | undefined) => {
+    const pending = target ? [renderOrigin(target)] : [];
+    const seen = new Set<Node>();
+    const result: unknown[] = [];
+    while (pending.length) {
+      const origin = pending.pop();
+      if (!origin || seen.has(origin)) continue;
+      seen.add(origin);
+      result.push([origin.getSourceFile().getFilePath(), renderShape(origin)]);
+      for (const identifier of origin.getDescendants().filter(Node.isIdentifier)) pending.push(renderOrigin(identifier));
+    }
+    return result;
+  };
   for (const file of files) for (const node of file.getDescendants()) {
     let target: Node | undefined;
     if (Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) target = node.getTagNameNode();
@@ -1139,32 +1217,62 @@ function invocationContexts(files: Iterable<SourceFile>) {
               ["createElement", "default.createElement"].includes(reference(parent.getExpression())!.exported))))) continue;
       target = node;
     }
-    const fn = target && localFunction(target);
+    const fn = target && renderOrigin(target);
     if (fn) calls.set(fn, [...(calls.get(fn) ?? []), node]);
   }
   const signature = (call: Node) => {
     if (Node.isJsxOpeningElement(call) || Node.isJsxSelfClosingElement(call))
-      return call.getAttributes().filter((attribute) => !Node.isJsxAttribute(attribute) || !["style", "className"].includes(attribute.getNameNode().getText())).map(syntax);
+      return call.getAttributes().filter((attribute) => !presentationAttribute(call, attribute, components)).map(syntax);
     if (Node.isCallExpression(call)) {
       const callee = reference(call.getExpression());
       if (callee?.module === "react" && ["createElement", "default.createElement"].includes(callee.exported)) {
-        const [, props, ...children] = call.getArguments();
-        return [props && Node.isObjectLiteralExpression(props)
-          ? props.getProperties().filter((property) => !Node.isPropertyAssignment(property) || !["style", "className"].includes(property.getName())).map(syntax)
-          : props ? syntax(props) : null, children.map(syntax)];
+        const [target, , ...children] = call.getArguments();
+        return [factoryContext(call, components), target ? dependencies(target) : [], children.map(syntax)];
       }
     }
-    return syntax(Node.isIdentifier(call) ? call.getParentOrThrow() : call);
+    if (Node.isIdentifier(call)) {
+      const parent = call.getParentOrThrow();
+      if (Node.isCallExpression(parent) && parent.getArguments().indexOf(call) >= 2) {
+        const callee = reference(parent.getExpression());
+        if (callee?.module === "react" && ["createElement", "default.createElement"].includes(callee.exported))
+          return ["child", dependencies(parent.getArguments()[0])];
+      }
+      if (Node.isJsxExpression(parent) && parent.getExpression() === call) {
+        const attribute = parent.getParent();
+        if (Node.isJsxAttribute(attribute)) {
+          const owner = attribute.getAncestors().find((ancestor) => Node.isJsxOpeningElement(ancestor) || Node.isJsxSelfClosingElement(ancestor));
+          return ["slot", attribute.getNameNode().getText(), owner ? dependencies(owner.getTagNameNode()) : []];
+        }
+        const owner = parent.getParent();
+        return ["child", Node.isJsxElement(owner) ? dependencies(owner.getOpeningElement().getTagNameNode()) : []];
+      }
+      const consumer = call.getAncestors().find((ancestor) => Node.isCallExpression(ancestor) || Node.isJsxAttribute(ancestor));
+      let target: Node | undefined;
+      if (consumer && Node.isCallExpression(consumer)) {
+        const callee = reference(consumer.getExpression());
+        target = callee?.module === "react" && ["createElement", "default.createElement"].includes(callee.exported) ? consumer.getArguments()[0] : consumer.getExpression();
+      } else if (consumer && Node.isJsxAttribute(consumer)) {
+        const owner = consumer.getAncestors().find((ancestor) => Node.isJsxOpeningElement(ancestor) || Node.isJsxSelfClosingElement(ancestor));
+        target = owner?.getTagNameNode();
+      }
+      return ["unknown consumption", syntax(parent), dependencies(target)];
+    }
+    return syntax(call);
   };
   const context = (node: Node, seen = new Set<Node>()): unknown[][] => {
-    let fn: Node | undefined = node.getAncestors().find((parent) => Node.isFunctionDeclaration(parent) || Node.isArrowFunction(parent) || Node.isFunctionExpression(parent) || Node.isMethodDeclaration(parent));
+    let fn: Node | undefined = node.getAncestors().find((parent) => Node.isVariableDeclaration(parent) || Node.isFunctionDeclaration(parent) || Node.isArrowFunction(parent) || Node.isFunctionExpression(parent) || Node.isMethodDeclaration(parent));
     if (fn && Node.isMethodDeclaration(fn) && Node.isClassDeclaration(fn.getParent())) fn = fn.getParent();
     if (!fn) return [[]];
-    if (!calls.has(fn)) return context(fn, seen);
-    if (seen.has(fn)) throw new StudioError("Recursive local control invocation cannot be preserved safely. Resolve this compatibility gap before acceptance.", 422);
+    if (!calls.has(fn)) {
+      const parent = fn.getParent();
+      if (Node.isCallExpression(parent))
+        return context(fn, seen).map((parents) => [["callback consumption", dependencies(parent.getExpression())], ...parents]);
+      return context(fn, seen);
+    }
+    if (seen.has(fn)) throw new StudioError("Recursive native render-use consumption cannot be preserved safely. Resolve this compatibility gap before acceptance.", 422);
     const next = new Set([...seen, fn]);
     return calls.get(fn)!.flatMap((call) => context(call, next).map((parents) => [
-      [call.getSourceFile().getFilePath(), lexicalIdentity(call), controlExecutionContext(call), signature(call)], ...parents,
+      [call.getSourceFile().getFilePath(), lexicalIdentity(call), controlExecutionContext(call, components), signature(call)], ...parents,
     ]));
   };
   return context;
@@ -1186,15 +1294,15 @@ export function validateCapabilities(files: Files, manifest: Manifest, previous:
       throw new StudioError(`Library capability ${origin.module}#${origin.exported} is not admitted. Ask the library maintainer for documented setup and examples in an updated release.`, 422);
   };
   const controls = new Map<string, number>();
-  let invocations: ReturnType<typeof invocationContexts>;
+  let invocations: ReturnType<typeof nativeRenderUses>;
   const nativeControl = (file: SourceFile, expression: Node, tag: string, properties: ControlProperty[], collecting: boolean) => {
     if (!replacementControl(tag, properties)) return;
-    const key = JSON.stringify([file.getFilePath(), lexicalIdentity(expression), controlExecutionContext(expression), tag,
-      properties.filter((property) => !["style", "className"].includes(property.name ?? "")).map((property) => [property.name, property.value === undefined ? property.expression : property.value])]);
+    const key = JSON.stringify([file.getFilePath(), lexicalIdentity(expression), expression.getAncestors().filter(Node.isVariableDeclaration).map((declaration) => declaration.getName()), controlExecutionContext(expression, manifest.libraries.flatMap((library) => library.components)), tag,
+      properties.filter((property) => !["style", "className"].includes(property.name ?? "") || property.value === undefined).map((property) => [property.name, property.value === undefined ? property.expression : property.value])]);
     for (const occurrence of [key, ...invocations(expression).filter((context) => context.length).map((context) => JSON.stringify([key, context]))]) {
       const remaining = controls.get(occurrence) ?? 0;
       if (!collecting && !remaining)
-        throw new StudioError(`The proposal invents a ${tag} control or changes its preserved execution or invocation context. Studio must use the admitted library capability.`, 422);
+        throw new StudioError(`The proposal invents or repeats a historical ${tag} control, or changes its preserved execution/use context in ${file.getFilePath().slice(1)} through ${expression.getAncestors().find(Node.isVariableDeclaration)?.getName() ?? lexicalIdentity(expression)[0] ?? "the page"}. Studio cannot establish preservation safely; keep this region unchanged or use an admitted library capability.`, 422);
       controls.set(occurrence, remaining + (collecting ? 1 : -1));
     }
   };
@@ -1244,13 +1352,13 @@ export function validateCapabilities(files: Files, manifest: Manifest, previous:
   for (const prior of Array.isArray(previous) ? previous : [previous]) {
     controls.clear();
     const closure = sourceClosure(prior === files ? project : sourceProject(prior), prior, manifest);
-    invocations = invocationContexts(closure);
+    invocations = nativeRenderUses(closure, manifest.libraries.flatMap((library) => library.components));
     for (const file of closure) inspect(file, true);
     for (const [key, count] of controls) preserved.set(key, Math.max(preserved.get(key) ?? 0, count));
   }
   controls.clear();
   for (const [key, count] of preserved) controls.set(key, count);
   const closure = sourceClosure(project, files, manifest);
-  invocations = invocationContexts(closure);
+  invocations = nativeRenderUses(closure, manifest.libraries.flatMap((library) => library.components));
   for (const file of closure) inspect(file, false);
 }

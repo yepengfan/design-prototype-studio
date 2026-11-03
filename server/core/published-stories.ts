@@ -41,7 +41,7 @@ export async function publishedStories(root: string, packageName: string) {
   const project = new Project({ useInMemoryFileSystem: true });
   const result = new Map<
     string,
-    { description?: string; examples: Component["examples"]; setup: string[] }
+    { description?: string; examples: Component["examples"]; setup: string[]; provider?: string; insertionGap?: string }
   >();
   const unwrap = (input: Expression | undefined): Expression | undefined => {
     while (
@@ -55,14 +55,22 @@ export async function publishedStories(root: string, packageName: string) {
   };
   const setupExports = (source: import("ts-morph").SourceFile) => {
     const identities = new Set<string>();
+    const providers: string[] = [];
+    let unsafe = false;
     for (const property of source.getDescendants().filter(Node.isPropertyAssignment)) {
       if (property.getName() !== "decorators") continue;
       const decorators = unwrap(property.getInitializer());
-      if (!decorators || !Node.isArrayLiteralExpression(decorators)) continue;
+      if (!decorators || !Node.isArrayLiteralExpression(decorators)) { unsafe = true; continue; }
       for (const decorator of decorators.getElements()) {
-        if (!Node.isArrowFunction(decorator) && !Node.isFunctionExpression(decorator)) continue;
+        if (!Node.isArrowFunction(decorator) && !Node.isFunctionExpression(decorator)) { unsafe = true; continue; }
+        const recipe: string[] = [];
+        let body: Node | undefined = decorator.getBody();
+        if (Node.isBlock(body)) {
+          const statements = body.getStatements();
+          body = statements.length === 1 && Node.isReturnStatement(statements[0]) ? statements[0].getExpression() : undefined;
+        }
         const story = decorator.getParameters()[0]?.getNameNode().getSymbol()?.compilerSymbol;
-        if (!story) continue;
+        if (!story) { unsafe = true; continue; }
         for (const wrapper of decorator.getDescendants().filter(Node.isJsxElement)) {
           if (!wrapper.getDescendants().some((node) =>
             (Node.isJsxSelfClosingElement(node) || Node.isJsxOpeningElement(node)) && Node.isIdentifier(node.getTagNameNode()) && node.getTagNameNode().getSymbol()?.compilerSymbol === story)) continue;
@@ -70,17 +78,26 @@ export async function publishedStories(root: string, packageName: string) {
           for (const declaration of source.getImportDeclarations()) {
             if (declaration.getModuleSpecifierValue() !== packageName) continue;
             const named = declaration.getNamedImports().find((binding) => (binding.getAliasNode()?.getText() ?? binding.getName()) === tag);
-            if (named) identities.add(packageName + "#" + named.getName());
-            if (declaration.getDefaultImport()?.getText() === tag) identities.add(packageName + "#default");
             const namespace = declaration.getNamespaceImport()?.getText();
-            if (namespace && tag.startsWith(namespace + ".")) identities.add(packageName + "#" + tag.slice(namespace.length + 1));
+            const identity = named ? packageName + "#" + named.getName() : declaration.getDefaultImport()?.getText() === tag ? packageName + "#default" : namespace && tag.startsWith(namespace + ".") ? packageName + "#" + tag.slice(namespace.length + 1) : undefined;
+            if (identity) {
+              identities.add(identity);
+              const children = wrapper.getJsxChildren().filter((child) => !Node.isJsxText(child) || child.getText().trim());
+              const child = children[0];
+              const bound = named?.getAliasNode() ?? named?.getNameNode() ?? declaration.getDefaultImport() ?? declaration.getNamespaceImport();
+              let root: Node = wrapper.getOpeningElement().getTagNameNode();
+              while (Node.isPropertyAccessExpression(root)) root = root.getExpression();
+              if (body === wrapper && wrapper.getOpeningElement().getAttributes().length === 0 && children.length === 1 && child && Node.isJsxSelfClosingElement(child) && child.getTagNameNode().getSymbol()?.compilerSymbol === story && child.getAttributes().length === 0 && root.getSymbol()?.compilerSymbol === bound?.getSymbol()?.compilerSymbol && !identity.split("#")[1].includes(".")) recipe.push(identity);
+            }
           }
         }
+        if (recipe.length === 1) providers.push(recipe[0]);
+        else unsafe = true;
       }
     }
-    return [...identities];
+    return { identities: [...identities], provider: !unsafe && providers.length === 1 ? providers[0] : undefined, gap: unsafe || providers.length > 1 };
   };
-  const globalSetup = preview ? setupExports(project.createSourceFile(preview, await fs.readFile(path.join(root, preview), "utf8"))) : [];
+  const globalSetup = preview ? setupExports(project.createSourceFile(preview, await fs.readFile(path.join(root, preview), "utf8"))) : { identities: [], provider: undefined, gap: false };
   for (const file of files) {
     const stat = await fs.stat(path.join(root, file));
     if (stat.size > 200000) continue;
@@ -115,8 +132,12 @@ export async function publishedStories(root: string, packageName: string) {
     }
     if (current && Node.isStringLiteral(current))
       description = current.getLiteralValue();
-    const group = result.get(exported) ?? { description, examples: [], setup: [] };
-    group.setup = [...new Set([...group.setup, ...globalSetup, ...setupExports(source)])];
+    const localSetup = setupExports(source);
+    const provider = globalSetup.provider ?? localSetup.provider;
+    const group = result.get(exported) ?? { description, examples: [], setup: [], provider };
+    if (globalSetup.gap || localSetup.gap || (globalSetup.provider && localSetup.provider) || group.provider !== provider)
+      group.insertionGap = "The published decorators require setup that cannot be carried into insertion unambiguously. Ask the library maintainer for a documented reusable provider or use a prompt retaining the published setup.";
+    group.setup = [...new Set([...group.setup, ...globalSetup.identities, ...localSetup.identities])];
     for (const variable of source.getVariableDeclarations()) {
       if (!variable.getVariableStatement()?.isExported()) continue;
       const story = unwrap(variable.getInitializer());

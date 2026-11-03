@@ -1,4 +1,4 @@
-import { providerSetup, projectSpecifier } from "./providers.js";
+import { providerSetup, projectSpecifier, effectiveStorybookPreview } from "./providers.js";
 import { readFileSync } from "node:fs";
 import { Project, Node } from "ts-morph";
 import { StudioError } from "./contracts.js";
@@ -130,11 +130,7 @@ export default defineConfig({ testDir: "./tests", use: { baseURL: url, viewport:
 export function synchronizeRuntime(input: Files, manifest: Manifest): Files {
   const files = { ...input };
   files["studio.project.json"] = JSON.stringify(manifest, null, 2) + "\n";
-  const preview = files[".storybook/preview.tsx"]
-    ? ".storybook/preview.tsx"
-    : files[".storybook/preview.ts"]
-      ? ".storybook/preview.ts"
-      : undefined;
+  const preview = effectiveStorybookPreview(files);
   const managedPreview =
     manifest.sourceOrigin !== "legacy" &&
     files[".storybook/preview.tsx"]?.startsWith("// Studio preview");

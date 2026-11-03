@@ -57,6 +57,7 @@ export const componentSchema = z.object({
   styles: z.array(z.string()).default([]),
   provider: z.string().optional(),
   setup: z.array(z.string()).optional(),
+  insertionGap: z.string().optional(),
 });
 export type Component = z.infer<typeof componentSchema>;
 export const scenarioBindingSchema = z.object({
