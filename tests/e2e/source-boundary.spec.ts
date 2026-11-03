@@ -6,6 +6,7 @@ import { createServer as createViteServer } from "vite";
 import react from "@vitejs/plugin-react";
 import { createApp } from "../../server/app";
 import { accountFreeAI } from "../account-free-ai";
+import { componentSchema } from "../../server/core/contracts";
 import { blankProject } from "../../server/core/project";
 import { anchors, editSource } from "../../server/core/source";
 import { digest, writeFiles } from "../../server/core/files";
@@ -24,7 +25,9 @@ test("publication preserves native render uses through values, aliases, wrappers
   const studio = await createApp({ root: path.join(root, "studio"), origin, ai: accountFreeAI });
   studio.previews.verify = async () => {};
   server.on("request", studio.app);
-  const vite = await createViteServer({ root: runtime, configFile: false, plugins: [react()], server: { host: "127.0.0.1", port: 0, hmr: false } });
+  const consumerFile = path.join(root, "consumer.tsx");
+  await fs.writeFile(consumerFile, `import {createElement as h} from "react";export function Once({children}){return h("aside",null,children)}export function Twice({children}){return h("aside",null,children,children)}`);
+  const vite = await createViteServer({ resolve: { alias: { "@fixture/consumer": consumerFile } }, root: runtime, configFile: false, plugins: [react()], server: { host: "127.0.0.1", port: 0, hmr: false } });
   const secret = (await (await fetch(origin + "/api/session")).json()).secret;
   const request = async (id: string, snapshot: { id: string; files: Record<string, string> }, operation: string, tag: string, extra = {}) => {
     const node = anchors(snapshot.files["src/pages/Page.tsx"]).find((node) => node.tag === tag && (tag !== "section" || !!node.parent))!;
@@ -35,15 +38,16 @@ test("publication preserves native render uses through values, aliases, wrappers
   const button = `<button onClick={${handler}}>Confirm</button>`;
   const factory = `h('button',{onClick:${handler}},'Confirm')`;
   const cases = [
+    { name: "external alias", definitions: `import {Once as Box} from "@fixture/consumer";`, use: `<Box>${button}</Box>` },
     { name: "direct", definitions: "", use: button },
-    { name: "direct JSX child", definitions: `function Slot({children}){return <aside>{children}</aside>}`, use: `<Slot>${button}</Slot>`, consumer: "children", factoryConsumer: false },
-    { name: "inline JSX slot", definitions: `function Slot({header}){return <aside>{header}</aside>}`, use: `<Slot header={${button}}/>`, consumer: "header", factoryConsumer: false },
-    { name: "direct factory child", definitions: `function Slot({children}){return h('aside',null,children)}`, use: `{h(Slot,null,${factory})}`, consumer: "children", factoryConsumer: true },
-    { name: "inline factory slot", definitions: `function Slot({header}){return h('aside',null,header)}`, use: `{h(Slot,{header:${factory}})}`, consumer: "header", factoryConsumer: true },
+    { name: "direct JSX child", definitions: `function Slot({children}){return <aside><h2>Caption</h2>{children}</aside>}`, use: `<Slot>${button}</Slot>`, consumer: "children", factoryConsumer: false },
+    { name: "inline JSX slot", definitions: `function Slot({header}){return <aside><h2>Caption</h2>{header}</aside>}`, use: `<Slot header={${button}}/>`, consumer: "header", factoryConsumer: false },
+    { name: "direct factory child", definitions: `function Slot({children}){return h('aside',null,h('h2',null,'Caption'),children)}`, use: `{h(Slot,null,${factory})}`, consumer: "children", factoryConsumer: true },
+    { name: "inline factory slot", definitions: `function Slot({header}){return h('aside',null,h('h2',null,'Caption'),header)}`, use: `{h(Slot,{header:${factory}})}`, consumer: "header", factoryConsumer: true },
     { name: "wrapper", definitions: `function Legacy(){return ${button}}`, use: "<Legacy/>" },
     { name: "wrapper alias", definitions: `function Legacy(){return ${button}}const Alias=Legacy;`, use: "<Alias/>" },
     { name: "value", definitions: `const action=${button};`, use: "{action}" },
-    { name: "value slot", definitions: `const action=${button};function Slot({header}){return <aside>{header}</aside>}`, use: "<Slot header={action}/>" },
+    { name: "value slot", definitions: `const action=${button};function Slot({header}){return <aside><h2>Caption</h2>{header}</aside>}`, use: "<Slot header={action}/>" },
     { name: "value alias", definitions: `const action=${button};const alias=action;`, use: "{alias}" },
     { name: "factory value", definitions: `const action=${factory};const alias=action;`, use: "{alias}" },
     { name: "factory wrapper", definitions: `function Legacy(){return ${factory}}const Alias=Legacy;`, use: "{h(Alias)}" },
@@ -55,6 +59,7 @@ test("publication preserves native render uses through values, aliases, wrappers
       project.files["requirements/notice.feature"] = "Feature: Notice\nScenario: Confirm\nGiven a notice exists\nThen confirmation is available\n";
       project.manifest.scope = ["requirements"];
       project.files["src/pages/Page.tsx"] = `import {createElement as h} from 'react';${fixture.definitions}export function Page(){return <main><p id="result">Ready</p><section>${fixture.use}</section><section>${fixture.use}</section></main>}`;
+      if (fixture.name === "external alias") project.manifest.libraries = [{ name: "@fixture/consumer", version: "1.0.0", components: ["Once", "Twice"].map((name) => componentSchema.parse({ name, export: name, package: "@fixture/consumer", version: "1.0.0", description: "Container", provenance: "Published", children: true, props: {}, examples: [{ name: "Default", props: {} }] })) }];
       const initial = await studio.store.create(project.manifest, project.files);
       const id = initial.state.id;
       let snapshot = initial.snapshot;
@@ -94,6 +99,36 @@ test("publication preserves native render uses through values, aliases, wrappers
           snapshot = (await response.json()).snapshot;
           await render(2);
         }
+      }
+      if (fixture.consumer && !fixture.factoryConsumer) {
+        const text = await request(id, snapshot, "text", "h2", { value: "Inspector caption" });
+        expect(text.status, fixture.name + " inspector caption").toBe(200);
+        snapshot = text.body.snapshot;
+        await render(2);
+        await expect(page.getByRole("heading").first()).toHaveText("Inspector caption");
+        const pending = await studio.store.get(id);
+        pending.state.runs.push({ id: "prompt-caption", base: snapshot.id, page: "page", adapter: "codex", prompt: "Update the caption", status: "review", events: [], proposal: { kind: "presentation", summary: "Caption", files: { "src/pages/Page.tsx": snapshot.files["src/pages/Page.tsx"].replace("Inspector caption", "Prompt caption") }, questions: [], affectedScenarios: [] } });
+        await studio.store.saveState(pending.state);
+        const response = await fetch(`${origin}/api/projects/${id}/runs/prompt-caption/apply`, { method: "POST", headers: { "Content-Type": "application/json", "X-Studio-Session": secret }, body: "{}" });
+        expect(response.status, fixture.name + " prompt caption " + await response.clone().text()).toBe(200);
+        snapshot = (await response.json()).snapshot;
+        await render(2);
+        await expect(page.getByRole("heading").first()).toHaveText("Prompt caption");
+      }
+      if (fixture.name === "external alias") {
+        const accepted = snapshot;
+        const changed = snapshot.files["src/pages/Page.tsx"].replace("Once as Box", "Twice as Box");
+        snapshot = { ...snapshot, id: "unchecked-identity", files: { ...snapshot.files, "src/pages/Page.tsx": changed } };
+        await render(4);
+        snapshot = accepted;
+        await render(2);
+        const pending = await studio.store.get(id);
+        pending.state.runs.push({ id: "replace-consumer", base: snapshot.id, page: "page", adapter: "codex", prompt: "Repeat", status: "review", events: [], proposal: { kind: "business", summary: "Repeat", files: { "src/pages/Page.tsx": changed, "requirements/notice.feature": snapshot.files["requirements/notice.feature"].replace("available", "repeated") }, questions: [], affectedScenarios: [] } });
+        await studio.store.saveState(pending.state);
+        const response = await fetch(`${origin}/api/projects/${id}/runs/replace-consumer/apply`, { method: "POST", headers: { "Content-Type": "application/json", "X-Studio-Session": secret }, body: "{}" });
+        expect(response.status).toBe(422);
+        expect((await response.json()).error).toMatch(/control|preserv/);
+        expect((await studio.store.get(id)).snapshot).toEqual(snapshot);
       }
       if (fixture.consumer) {
         if (fixture.factoryConsumer) {

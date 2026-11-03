@@ -2,6 +2,10 @@ import { test, expect } from "@playwright/test";
 import { createServer } from "node:http";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { createServer as createViteServer } from "vite";
+import react from "@vitejs/plugin-react";
+import { readArchive } from "../../server/core/archive";
+import { installProject } from "../../server/core/libraries";
 import { createApp } from "../../server/app";
 import { registryFixture } from "../registry";
 import { accountFreeAI } from "../account-free-ai";
@@ -30,9 +34,12 @@ test("optional components retain render-recipe providers or report insertion set
   try {
     for (const reusable of [true, false]) {
       const name = reusable ? "@studio-test/render-notice" : "@studio-test/render-gap";
-      await registry.publish({ name, version: "1.0.0", type: "module", types: "./index.d.ts", exports: { ".": { types: "./index.d.ts", default: "./index.js" } }, peerDependencies: { react: "^19.3.1" } }, {
-        "index.js": `import {createElement as h,createContext,useContext} from 'react';const Context=createContext(false);export function Provider({children}){return h(Context.Provider,{value:true},children)}export function Notice({tone='Ready'}){if(!useContext(Context))throw new Error('Render setup required');return h('aside',{'aria-label':'Published notice'},tone)}`,
+      await registry.publish({ name, version: "1.0.0", type: "module", types: "./index.d.ts", exports: { ".": { types: "./index.d.ts", default: "./index.js" }, "./appearance.css": "./theme.css" }, peerDependencies: { react: "^19.3.1" } }, {
+        "index.js": `import {createElement as h,createContext,useContext} from 'react';const Context=createContext(false);export function Provider({children}){return h(Context.Provider,{value:true},children)}export function Notice({tone='Ready'}){if(!useContext(Context))throw new Error('Render setup required');return h('aside',{'aria-label':'Published notice',className:'published-notice'},tone)}`,
         "index.d.ts": `import type {ReactNode} from 'react';export interface NoticeProps {\n/** Surface tone. */\ntone?:string;}\n/** Explain a contextual notice. */\nexport declare function Notice(props:NoticeProps):ReactNode;export declare function Provider(props:{children?:ReactNode;enabled?:boolean}):ReactNode;`,
+        ".storybook/preview.tsx": "import '../theme.css';export default {};",
+        "theme.css": ".published-notice{color:rgb(31,83,119);padding:17px;background-image:url('./assets/tile.svg')}",
+        "assets/tile.svg": '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="white"/></svg>',
         "Notice.stories.tsx": `import {Notice,Provider} from '${name}';export default {component:Notice};export const Default={render:${reusable ? "()=> <Provider><Notice/></Provider>" : "()=>{const enabled=true;return <Provider enabled={enabled}><Notice/></Provider>}"}};`,
       });
       const created = await request("/projects", { name: "Render setup " + reusable });
@@ -44,11 +51,13 @@ test("optional components retain render-recipe providers or report insertion set
       const impact = await request(`/projects/${id}/library`, { base: data.snapshot.id, name, version: "1.0.0", registry: registry.base, trust: true, apply: false });
       expect(impact.status, JSON.stringify(impact.data)).toBe(200);
       const notice = impact.data.components.find((component: { export: string }) => component.export === "Notice");
+      expect(notice.styles).toEqual([name + "/appearance.css"]);
       expect(notice.requiresBehavior).toBe(false);
       if (reusable) expect(notice.provider).toBe(name + "#Provider");
       else expect(notice.insertionGap).toMatch(/render.*setup/i);
       await page.goto(impact.data.preview.url);
       await expect(page.getByRole("complementary", { name: "Published notice" })).toHaveText("Ready");
+      await expect(page.getByRole("complementary", { name: "Published notice" })).toHaveCSS("color", "rgb(31, 83, 119)");
       studio.previews.stop(impact.data.preview.id);
       const admitted = await request(`/projects/${id}/library`, { base: data.snapshot.id, name, version: "1.0.0", registry: registry.base, trust: true, apply: true });
       expect(admitted.status, JSON.stringify(admitted.data)).toBe(200);
@@ -61,7 +70,28 @@ test("optional components retain render-recipe providers or report insertion set
         expect(preview.status).toBe(200);
         await page.goto(preview.data.url);
         await expect(page.getByRole("complementary", { name: "Published notice" })).toHaveText("Ready");
+        await expect(page.getByRole("complementary", { name: "Published notice" })).toHaveCSS("color", "rgb(31, 83, 119)");
+        await expect(page.getByRole("complementary", { name: "Published notice" })).toHaveCSS("padding", "17px");
         studio.previews.stop(preview.data.id);
+        const response = await fetch(origin + `/api/projects/${id}/export`, { headers: { "X-Studio-Session": secret } });
+        expect(response.status).toBe(200);
+        const exported = readArchive(Buffer.from(await response.arrayBuffer()));
+        const manifest = JSON.parse(exported["studio.project.json"]);
+        expect(manifest.styles).toContain(name + "/appearance.css");
+        const fresh = path.join(root, "exported");
+        await installProject(fresh, exported, manifest.libraries);
+        const vite = await createViteServer({ root: fresh, configFile: false, plugins: [react()], server: { host: "127.0.0.1", port: 0, hmr: false } });
+        try {
+          await vite.listen();
+          await page.goto(vite.resolvedUrls!.local[0]);
+          const notice = page.getByRole("complementary", { name: "Published notice" });
+          await expect(notice).toHaveCSS("color", "rgb(31, 83, 119)");
+          await expect(notice).toHaveCSS("padding", "17px");
+          const image = await notice.evaluate((node) => getComputedStyle(node).backgroundImage);
+          const asset = image.match(/url\("?([^"\)]+)/)?.[1];
+          expect(asset).toBeTruthy();
+          expect((await page.request.get(asset!)).status()).toBe(200);
+        } finally { await vite.close(); }
       } else {
         expect(insertion.status).toBe(422);
         expect(insertion.data.error).toMatch(/render.*setup/i);

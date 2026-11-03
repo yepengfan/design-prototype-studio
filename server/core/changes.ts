@@ -13,7 +13,7 @@ import {
 import { validateFiles, digest, safeRelative } from "./files.js";
 import { parseRequirements } from "./requirements.js";
 import { synchronizeRuntime } from "./project.js";
-import { anchors, validateCapabilities, localSourceClosure } from "./source.js";
+import { anchors, validateCapabilities, localSourceClosure, presentationText, literalValue } from "./source.js";
 import { effectiveStorybookPreview } from "./providers.js";
 import { closureDiagnostics } from "./archive.js";
 
@@ -29,7 +29,7 @@ export const differences = (before: Files, after: Files) =>
     }));
 // Compare syntax and literal values, not source spelling. Comments, quote choice and
 // indentation carry no business meaning; whitespace inside strings still does.
-function withoutPresentation(source: string, components: Component[]) {
+function withoutPresentation(source: string, components: Component[], businessText: string[]) {
   const p = new Project({ useInMemoryFileSystem: true, compilerOptions: { noLib: true } });
   const f = p.createSourceFile("page.tsx", source);
   const literal = (node: ts.Node): boolean => {
@@ -124,6 +124,11 @@ function withoutPresentation(source: string, components: Component[]) {
         )
     )
       declaration.remove();
+  }
+  for (const node of f.getDescendants().filter(presentationText).reverse()) {
+    const text = Node.isJsxText(node) ? node.getText().trim() : String(Node.isJsxExpression(node) ? literalValue(node.getExpression()) : literalValue(node));
+    if (text && businessText.some((step) => step.toLowerCase().includes(text.toLowerCase()))) continue;
+    node.replaceWithText(Node.isJsxText(node) || Node.isJsxExpression(node) ? "" : '""');
   }
   const transparent = (node: ts.Node): node is ts.JsxElement | ts.JsxFragment =>
     ts.isJsxFragment(node) || (ts.isJsxElement(node) &&
@@ -269,6 +274,7 @@ export function prepareChange(
         "Preserve scenario mappings outside the selected working scope.",
         422,
       );
+  const businessText = [...scopeBefore.scenarios, ...scopeAfter.scenarios].flatMap((scenario) => scenario.steps.map((step) => step.text));
   const behavior = diff.some((d) => {
     if (d.file === "studio.project.json")
       return (
@@ -280,10 +286,12 @@ export function prepareChange(
         withoutPresentation(
           d.before,
           base.manifest.libraries.flatMap((library) => library.components),
+          businessText,
         ) !==
         withoutPresentation(
           d.after,
           manifest.libraries.flatMap((library) => library.components),
+          businessText,
         )
       );
     return !/\.(css|svg|png|jpg|woff2?)$/.test(d.file);

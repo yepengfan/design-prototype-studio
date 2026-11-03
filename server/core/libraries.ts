@@ -138,6 +138,7 @@ export async function inspectLibrary(
   const components: Component[] = [];
   const warnings: string[] = [];
   let templates: string[] = [];
+  const stories = await publishedStories(await fs.realpath(root), name);
   if (pkg.studio) {
     const metadata = JSON.parse(
       await fs.readFile(
@@ -188,7 +189,6 @@ export async function inspectLibrary(
     const readme = await fs
       .readFile(path.join(root, "README.md"), "utf8")
       .catch(() => "");
-    const stories = await publishedStories(await fs.realpath(root), name);
     const checker = project.getTypeChecker();
     for (const [symbolName, declarations] of file.getExportedDeclarations()) {
       const declaration = declarations[0];
@@ -383,6 +383,9 @@ export async function inspectLibrary(
   }
   // Verify symbols against actual runtime exports in the preview/build phase, never import package code into this service.
   for (const c of components) {
+    const published = stories.get(c.export);
+    c.styles = [...new Set([...c.styles, ...(published?.styles ?? [])])];
+    c.insertionGap = [c.insertionGap, published?.styleGap].filter(Boolean).join(" ") || undefined;
     componentReference(c.export);
     for (const example of c.examples)
       if (example.story) {

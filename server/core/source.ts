@@ -1158,7 +1158,20 @@ function renderOrigin(node: Node, seen = new Set<Node>()): Node | undefined {
   }
   return undefined;
 }
-function nativeRenderUses(input: Iterable<SourceFile>, components: Component[]) {
+export function presentationText(node: Node) {
+  if (Node.isJsxText(node) || (Node.isJsxExpression(node) && ["string", "number"].includes(typeof literalValue(node.getExpression())))) {
+    const owner = node.getParent();
+    return Node.isJsxElement(owner) && /^(?:h[1-6]|p|span|small|strong|em|div|section|article|aside|main|header|footer)$/.test(opening(owner).getTagNameNode().getText()) && !behaviorAttributes(owner);
+  }
+  const parent = node.getParent();
+  if ((Node.isStringLiteral(node) || Node.isNumericLiteral(node)) && Node.isCallExpression(parent) && parent.getArguments().indexOf(node) >= 2) {
+    const callee = reference(parent.getExpression());
+    const target = parent.getArguments()[0];
+    return callee?.module === "react" && ["createElement", "default.createElement"].includes(callee.exported) && !!target && Node.isStringLiteral(target) && /^(?:h[1-6]|p|span|small|strong|em|div|section|article|aside|main|header|footer)$/.test(target.getLiteralValue()) && !factoryContext(parent, []).length;
+  }
+  return false;
+}
+function nativeRenderUses(input: Iterable<SourceFile>, components: Component[], libraries: Manifest["libraries"]) {
   const files = [...input];
   const calls = new Map<Node, Node[]>();
   const origins = new Map<Node, Node | undefined>();
@@ -1166,8 +1179,16 @@ function nativeRenderUses(input: Iterable<SourceFile>, components: Component[]) 
     if (!origins.has(node)) origins.set(node, renderOrigin(node));
     return origins.get(node);
   };
+  const externalIdentity = (target: Node | undefined): unknown[] => {
+    const origin = target && reference(target);
+    if (!origin?.module) return [];
+    const library = libraries.find((library) => origin.module === library.name || origin.module.startsWith(library.name + "/"));
+    const component = components.find((component) => origin.module === component.package || origin.module.startsWith(component.package + "/"));
+    return [["external consumer", origin.module, library?.version ?? component?.version ?? null, origin.exported]];
+  };
   const shapes = new Map<Node, unknown[]>();
   const renderShape = (node: Node): unknown[] => {
+    if (presentationText(node)) return [];
     if (Node.isCallExpression(node)) {
       const callee = reference(node.getExpression());
       if (callee?.module === "react" && ["createElement", "default.createElement"].includes(callee.exported)) {
@@ -1175,7 +1196,7 @@ function nativeRenderUses(input: Iterable<SourceFile>, components: Component[]) 
         const props = factoryContext(node, components);
         const children = values.flatMap(renderShape);
         if (target && Node.isStringLiteral(target) && ["main", "div", "section", "article", "aside", "span"].includes(target.getLiteralValue()) && !props.length) return children;
-        return ["element", target ? syntax(target) : "missing target", props, children];
+        return ["element", externalIdentity(target).length ? externalIdentity(target) : target ? syntax(target) : "missing target", props, children];
       }
     }
     if (Node.isJsxFragment(node)) return node.getJsxChildren().flatMap(renderShape);
@@ -1186,7 +1207,7 @@ function nativeRenderUses(input: Iterable<SourceFile>, components: Component[]) 
       const props = op.getAttributes().filter((attribute) => !presentationAttribute(op, attribute, components));
       const children = Node.isJsxElement(node) ? node.getJsxChildren().flatMap(renderShape) : [];
       if (["main", "div", "section", "article", "aside", "span"].includes(op.getTagNameNode().getText()) && !props.length) return children;
-      return ["element", op.getTagNameNode().getText(), props.flatMap(renderShape), children];
+      return ["element", externalIdentity(op.getTagNameNode()).length ? externalIdentity(op.getTagNameNode()) : op.getTagNameNode().getText(), props.flatMap(renderShape), children];
     }
     const children = node.getChildren();
     return children.length ? children.flatMap(renderShape) : [node.getKindName(), node.getText()];
@@ -1194,14 +1215,21 @@ function nativeRenderUses(input: Iterable<SourceFile>, components: Component[]) 
   const dependencies = (target: Node | undefined) => {
     const pending = target ? [resolve(target)] : [];
     const seen = new Set<Node>();
-    const result: unknown[] = [];
+    const result: unknown[] = externalIdentity(target);
+    const external = new Set<string>(result.map((identity) => JSON.stringify(identity)));
     while (pending.length) {
       const origin = pending.pop();
       if (!origin || seen.has(origin)) continue;
       seen.add(origin);
       if (!shapes.has(origin)) shapes.set(origin, renderShape(origin));
       result.push([origin.getSourceFile().getFilePath(), shapes.get(origin)]);
-      for (const identifier of origin.getDescendants().filter(Node.isIdentifier)) pending.push(resolve(identifier));
+      for (const identifier of origin.getDescendants().filter(Node.isIdentifier)) {
+        for (const identity of externalIdentity(identifier)) {
+          const key = JSON.stringify(identity);
+          if (!external.has(key)) { external.add(key); result.push(identity); }
+        }
+        pending.push(resolve(identifier));
+      }
     }
     return result;
   };
@@ -1386,13 +1414,13 @@ export function validateCapabilities(files: Files, manifest: Manifest, previous:
   for (const prior of Array.isArray(previous) ? previous : [previous]) {
     controls.clear();
     const closure = sourceClosure(prior === files ? project : sourceProject(prior), prior, manifest);
-    invocations = nativeRenderUses(closure, manifest.libraries.flatMap((library) => library.components));
+    invocations = nativeRenderUses(closure, manifest.libraries.flatMap((library) => library.components), prior["studio.project.json"] ? JSON.parse(prior["studio.project.json"]).libraries ?? manifest.libraries : manifest.libraries);
     for (const file of closure) inspect(file, true);
     for (const [key, count] of controls) preserved.set(key, Math.max(preserved.get(key) ?? 0, count));
   }
   controls.clear();
   for (const [key, count] of preserved) controls.set(key, count);
   const closure = sourceClosure(project, files, manifest);
-  invocations = nativeRenderUses(closure, manifest.libraries.flatMap((library) => library.components));
+  invocations = nativeRenderUses(closure, manifest.libraries.flatMap((library) => library.components), manifest.libraries);
   for (const file of closure) inspect(file, false);
 }

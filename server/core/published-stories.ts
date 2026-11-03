@@ -1,12 +1,14 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { Project, Node, type Expression, type SourceFile } from "ts-morph";
+import { resolveLocal } from "./archive.js";
 import { literalValue } from "./source.js";
 import type { Component } from "./contracts.js";
 
 /** Bounded discovery of runnable, package-published CSF object examples. */
 export async function publishedStories(root: string, packageName: string) {
   const files: string[] = [];
+  const inventory: Record<string, string> = {};
   let visited = 0;
   async function walk(directory: string, prefix = "") {
     for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
@@ -19,7 +21,10 @@ export async function publishedStories(root: string, packageName: string) {
       const name = prefix + entry.name;
       if (entry.isDirectory())
         await walk(path.join(directory, entry.name), name + "/");
-      else if (/\.stories\.[tj]sx$/.test(name)) files.push(name);
+      else {
+        inventory[name] = "";
+        if (/\.stories\.[tj]sx$/.test(name)) files.push(name);
+      }
     }
   }
   await walk(root);
@@ -39,7 +44,7 @@ export async function publishedStories(root: string, packageName: string) {
     }
   }
   const project = new Project({ useInMemoryFileSystem: true });
-  type StoryGroup = { description?: string; examples: Component["examples"]; setup: string[]; provider?: string; insertionGap?: string };
+  type StoryGroup = { description?: string; examples: Component["examples"]; setup: string[]; styles: string[]; styleGap?: string; provider?: string; insertionGap?: string };
   const result = new Map<string, StoryGroup>();
   const unwrap = (input: Expression | undefined): Expression | undefined => {
     while (
@@ -141,12 +146,53 @@ export async function publishedStories(root: string, packageName: string) {
     if (providers.length > 1) reason = "The setup requires more than one provider wrapper.";
     return { identities: [...identities], provider: !unsafe && providers.length === 1 ? providers[0] : undefined, gap: unsafe || providers.length > 1, children, reason };
   };
-  const globalSetup = preview ? setupExports(project.createSourceFile(preview, await fs.readFile(path.join(root, preview), "utf8"))) : { identities: [], provider: undefined, gap: false, reason: undefined };
+  const pkg = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8"));
+  const targets = (value: unknown): string[] => typeof value === "string" ? [value] : value && typeof value === "object" ? Object.entries(value).filter(([key]) => key !== "types").flatMap(([, target]) => targets(target)) : [];
+  const stylesFor = async (entry: string) => {
+    const styles = new Set<string>();
+    const gaps = new Set<string>();
+    const seen = new Set<string>();
+    const visit = async (file: string): Promise<void> => {
+      if (seen.has(file)) return;
+      seen.add(file);
+      const content = await fs.readFile(path.join(root, file), "utf8");
+      if (Buffer.byteLength(content) > 200000) { gaps.add(`Stylesheet setup in ${file} exceeds the supported published source size.`); return; }
+      const source = project.getSourceFile(file) ?? project.createSourceFile(file, content);
+      const specs = [...source.getImportDeclarations().map((node) => node.getModuleSpecifierValue()), ...source.getExportDeclarations().flatMap((node) => node.getModuleSpecifierValue() ?? [])];
+      for (const call of source.getDescendants().filter(Node.isCallExpression)) {
+        if (["require", "import"].includes(call.getExpression().getText()) && Node.isStringLiteral(call.getArguments()[0])) specs.push((call.getArguments()[0] as import("ts-morph").StringLiteral).getLiteralValue());
+      }
+      for (const spec of specs) {
+        if (!spec.startsWith(".")) {
+          if (/\.css(?:$|[?#])/.test(spec)) {
+            const key = "." + spec.slice(packageName.length);
+            const candidates = spec.startsWith(packageName + "/") ? targets(pkg.exports?.[key]) : [];
+            if (candidates.length && candidates.every((target) => inventory[target.replace(/^\.\//, "")] !== undefined)) styles.add(spec);
+            else gaps.add(`Stylesheet ${spec} from ${file} cannot be carried through a verified public package asset.`);
+          }
+          continue;
+        }
+        const resolved = resolveLocal(inventory, file, spec);
+        if (!resolved) { gaps.add(`Published setup dependency ${spec} from ${file} cannot be resolved for stylesheet preservation.`); continue; }
+        if (/\.css$/.test(resolved)) {
+          const exports = pkg.exports && typeof pkg.exports === "object" ? Object.entries(pkg.exports) : [];
+          const exported = exports.find(([key, value]) => key.startsWith("./") && !key.includes("*") && targets(value).length > 0 && targets(value).every((target) => target === "./" + resolved));
+          if (!pkg.exports) styles.add(packageName + "/" + resolved);
+          else if (exported) styles.add(packageName + exported[0].slice(1));
+          else gaps.add(`Stylesheet ${resolved} from ${file} has no unambiguous public package asset for insertion.`);
+        } else if (/\.[cm]?[jt]sx?$/.test(resolved)) await visit(resolved);
+      }
+    };
+    await visit(entry);
+    return { styles: [...styles], gap: [...gaps].join(" ") || undefined };
+  };
+  const globalStyles = preview ? await stylesFor(preview) : { styles: [], gap: undefined };
+  const globalSetup = preview ? setupExports(project.getSourceFile(preview)!) : { identities: [], provider: undefined, gap: false, reason: undefined };
   for (const file of files) {
     const stat = await fs.stat(path.join(root, file));
     if (stat.size > 200000) continue;
     const content = await fs.readFile(path.join(root, file), "utf8");
-    const source = project.createSourceFile(file, content);
+    const source = project.getSourceFile(file) ?? project.createSourceFile(file, content);
     let meta = unwrap(source.getExportAssignments()[0]?.getExpression());
     if (meta && Node.isIdentifier(meta))
       meta = unwrap(
@@ -177,7 +223,10 @@ export async function publishedStories(root: string, packageName: string) {
     if (current && Node.isStringLiteral(current))
       description = current.getLiteralValue();
     const localSetup = setupExports(source);
-    const group: StoryGroup = result.get(exported) ?? { description, examples: [], setup: [] };
+    const group: StoryGroup = result.get(exported) ?? { description, examples: [], setup: [], styles: [] };
+    const localStyles = await stylesFor(file);
+    group.styles = [...new Set([...group.styles, ...globalStyles.styles, ...localStyles.styles])];
+    group.styleGap = [...new Set([group.styleGap, globalStyles.gap, localStyles.gap].filter(Boolean))].join(" ") || undefined;
     for (const variable of source.getVariableDeclarations()) {
       if (!variable.getVariableStatement()?.isExported()) continue;
       const story = unwrap(variable.getInitializer());
