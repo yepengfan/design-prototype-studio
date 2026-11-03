@@ -40,8 +40,8 @@ test("legacy import admits documented resolved components through factories, ali
     files["components/Alias.tsx"] = `import {Field} from '${name}';const F=Field;export function Alias(){return <F label="Variable alias"/>}`;
     files["components/Namespace.tsx"] = `import * as Controls from '${name}';const {Field:F}=Controls;export function Namespace(){return <F label="Namespace"/>}`;
     files["components/barrel.ts"] = `export {Field as F} from '${name}';`;
-    files["components/Barrel.tsx"] = "import {F} from './barrel';export function Barrel(){return <F label=\"Barrel\"/>}";
-    files["src/pages/Page.tsx"] = "import {Factory} from '../../components/Factory';import {FactoryAlias} from '../../components/FactoryAlias';import {Alias} from '../../components/Alias';import {Namespace} from '../../components/Namespace';import {Barrel} from '../../components/Barrel';export function Page(){return <main><h1>Imported forms</h1><Factory/><FactoryAlias/><Alias/><Namespace/><Barrel/></main>}";
+    files["components/BarrelView.tsx"] = "import {F} from './barrel';export function Barrel(){return <F label=\"Barrel\"/>}";
+    files["src/pages/Page.tsx"] = "import {Factory} from '../../components/Factory';import {FactoryAlias} from '../../components/FactoryAlias';import {Alias} from '../../components/Alias';import {Namespace} from '../../components/Namespace';import {Barrel} from '../../components/BarrelView';export function Page(){return <main><h1>Imported forms</h1><Factory/><FactoryAlias/><Alias/><Namespace/><Barrel/></main>}";
     files["src/Page.stories.tsx"] = "import {Page} from './pages/Page';export default {component:Page};export const Default={};";
     files["package-lock.json"] = await installProject(path.join(root, "original"), files, [{ name, registry: registry.base }], true);
     const zip = new AdmZip();
