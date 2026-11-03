@@ -159,6 +159,7 @@ export async function inspectLibrary(
           package: name,
           version,
           provenance: "Published package Studio manifest",
+          setup: [],
         }),
       );
     templates = (metadata.templates ?? []).map((t: string) => {
@@ -350,6 +351,7 @@ export async function inspectLibrary(
           children,
           examples,
           requiresBehavior: unsupportedRequired,
+          setup: stories.get(symbolName)?.setup ?? [],
         }),
       );
     }

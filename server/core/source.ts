@@ -277,15 +277,23 @@ export function editSource(
     throw new StudioError(
       "This item repeats or depends on a condition. Use a prompt to preserve the matching scenario behavior.",
     );
+  const behaviorBearing = (element: Element) =>
+    ["form", "fieldset"].includes(opening(element).getTagNameNode().getText()) ||
+    opening(element).getAttributes().some((attribute) =>
+      Node.isJsxSpreadAttribute(attribute) || (Node.isJsxAttribute(attribute) &&
+        (/^on[A-Z]/.test(attribute.getNameNode().getText()) ||
+          ["role", "aria-live", "hidden", "disabled", "ref", "form", "required", "name"].includes(attribute.getNameNode().getText())))) ||
+    element.getDescendants().some((child) => Node.isJsxExpression(child) &&
+      !!child.getExpression() && literalValue(child.getExpression()) === undefined);
   const business =
     (edit.operation === "remove" &&
-      (!!anchor.component ||
+      (behaviorBearing(node) || !!anchor.component ||
         /^[A-Z]/.test(anchor.tag) ||
         found.some(
           (child) =>
             child.start > anchor.start &&
             child.end < anchor.end &&
-            (child.component || /^[A-Z]/.test(child.tag)),
+            (child.component || /^[A-Z]/.test(child.tag) || behaviorBearing(all.find((node) => node.getStart() === child.start)!)),
         ))) ||
     (edit.operation === "prop" &&
       !!anchor.component?.props[edit.property ?? ""] &&
@@ -592,16 +600,18 @@ export function editSource(
       node.getDescendants().includes(parent)
     )
       throw new StudioError("Choose a different supported parent container.");
-    const protectedTags = new Set(["form"]);
+    const protectedTags = new Set(["form", "fieldset"]);
     for (const component of components) {
-      if (!component.provider) continue;
-      const [module, exported = "default"] = component.provider.split("#");
+      for (const setup of [component.provider, ...(component.setup ?? [])]) {
+      if (!setup) continue;
+      const [module, exported = "default"] = setup.split("#");
       for (const declaration of file.getImportDeclarations().filter((item) => item.getModuleSpecifierValue() === module)) {
         const named = declaration.getNamedImports().find((item) => item.getName() === exported);
         const local = named?.getAliasNode()?.getText() ?? named?.getName() ?? (exported === "default" ? declaration.getDefaultImport()?.getText() : undefined);
         if (local) protectedTags.add(local);
         const namespace = declaration.getNamespaceImport();
         if (namespace) protectedTags.add(namespace.getText() + "." + exported);
+      }
       }
     }
     const protectedNode = (element: Node) => jsx(element) && protectedTags.has(opening(element).getTagNameNode().getText());
@@ -849,6 +859,29 @@ export function validateCapabilities(files: Files, manifest: Manifest) {
       }
       return undefined;
     }
+    if (Node.isFunctionDeclaration(node) || Node.isClassDeclaration(node) || Node.isArrowFunction(node) || Node.isFunctionExpression(node))
+      return { module: "", exported: "" };
+    if (Node.isBindingElement(node)) {
+      const pattern = node.getParent();
+      const declaration = pattern.getParent();
+      if (!Node.isObjectBindingPattern(pattern) || !Node.isVariableDeclaration(declaration) || node.getDotDotDotToken() || node.getInitializer()) return undefined;
+      const initializer = declaration.getInitializer();
+      const base = initializer && reference(initializer, seen);
+      const property = node.getPropertyNameNode() ?? node.getNameNode();
+      if (!Node.isIdentifier(property) && !Node.isStringLiteral(property)) return undefined;
+      const name = Node.isStringLiteral(property) ? property.getLiteralValue() : property.getText();
+      return base && { ...base, exported: base.exported ? base.exported + "." + name : name };
+    }
+    if (Node.isCallExpression(node)) {
+      const callee = reference(node.getExpression(), seen);
+      if (callee?.module === "react") {
+        const name = callee.exported.replace(/^default\./, "");
+        if (name === "createContext") return { module: "react", exported: "Context" };
+        if (["memo", "forwardRef"].includes(name) && node.getArguments()[0]) return reference(node.getArguments()[0], seen);
+      }
+    }
+    if (Node.isParameterDeclaration(node) && node.getName() === "Story" && node.getAncestors().some((ancestor) => Node.isPropertyAssignment(ancestor) && ancestor.getName() === "decorators"))
+      return { module: "", exported: "" };
     if (Node.isVariableDeclaration(node)) {
       const initializer = node.getInitializer();
       return initializer && reference(initializer, seen);
@@ -882,22 +915,27 @@ export function validateCapabilities(files: Files, manifest: Manifest) {
   };
   const allowed = new Set(manifest.libraries.flatMap((library) => library.components.flatMap((component) => [
     component.package + "#" + component.export,
+    ...(component.setup ?? []),
     ...(component.provider ? [component.provider.includes("#") ? component.provider : component.provider + "#default"] : []),
   ])));
   if (manifest.provider) allowed.add(manifest.provider.includes("#") ? manifest.provider : manifest.provider + "#default");
-  const check = (node: Node) => {
+  const check = (node: Node, intrinsic = false) => {
     const origin = reference(node);
-    if (!origin || ["react", "react-dom"].some((module) => origin.module === module || origin.module.startsWith(module + "/"))) return;
+    if (intrinsic && Node.isIdentifier(node) && /^[a-z]/.test(node.getText())) return;
+    if (Node.isStringLiteral(node)) return;
+    if (!origin)
+      throw new StudioError(`The component reference ${node.getText()} cannot be identified safely. Use a direct documented import or resolve this source compatibility gap before acceptance.`, 422);
+    if (!origin.module || ["react", "react-dom"].some((module) => origin.module === module || origin.module.startsWith(module + "/"))) return;
     if (!allowed.has(origin.module + "#" + origin.exported))
       throw new StudioError(`Library capability ${origin.module}#${origin.exported} is not admitted. Ask the library maintainer for documented setup and examples in an updated release.`, 422);
   };
   for (const file of project.getSourceFiles()) {
     if (!file.getFilePath().startsWith("/src/")) continue;
     for (const node of file.getDescendants()) {
-      if (Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) check(node.getTagNameNode());
+      if (Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) check(node.getTagNameNode(), true);
       if (Node.isCallExpression(node)) {
         const callee = reference(node.getExpression());
-        if (callee?.module === "react" && callee.exported === "createElement" && node.getArguments()[0]) check(node.getArguments()[0]);
+        if (callee?.module === "react" && ["createElement", "default.createElement"].includes(callee.exported) && node.getArguments()[0]) check(node.getArguments()[0]);
       }
     }
   }

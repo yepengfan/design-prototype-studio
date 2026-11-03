@@ -41,7 +41,7 @@ export async function publishedStories(root: string, packageName: string) {
   const project = new Project({ useInMemoryFileSystem: true });
   const result = new Map<
     string,
-    { description?: string; examples: Component["examples"] }
+    { description?: string; examples: Component["examples"]; setup: string[] }
   >();
   const unwrap = (input: Expression | undefined): Expression | undefined => {
     while (
@@ -53,6 +53,34 @@ export async function publishedStories(root: string, packageName: string) {
       input = input.getExpression();
     return input;
   };
+  const setupExports = (source: import("ts-morph").SourceFile) => {
+    const identities = new Set<string>();
+    for (const property of source.getDescendants().filter(Node.isPropertyAssignment)) {
+      if (property.getName() !== "decorators") continue;
+      const decorators = unwrap(property.getInitializer());
+      if (!decorators || !Node.isArrayLiteralExpression(decorators)) continue;
+      for (const decorator of decorators.getElements()) {
+        if (!Node.isArrowFunction(decorator) && !Node.isFunctionExpression(decorator)) continue;
+        const story = decorator.getParameters()[0]?.getName();
+        if (!story) continue;
+        for (const wrapper of decorator.getDescendants().filter(Node.isJsxElement)) {
+          if (!wrapper.getDescendants().some((node) =>
+            (Node.isJsxSelfClosingElement(node) || Node.isJsxOpeningElement(node)) && node.getTagNameNode().getText() === story)) continue;
+          const tag = wrapper.getOpeningElement().getTagNameNode().getText();
+          for (const declaration of source.getImportDeclarations()) {
+            if (declaration.getModuleSpecifierValue() !== packageName) continue;
+            const named = declaration.getNamedImports().find((binding) => (binding.getAliasNode()?.getText() ?? binding.getName()) === tag);
+            if (named) identities.add(packageName + "#" + named.getName());
+            if (declaration.getDefaultImport()?.getText() === tag) identities.add(packageName + "#default");
+            const namespace = declaration.getNamespaceImport()?.getText();
+            if (namespace && tag.startsWith(namespace + ".")) identities.add(packageName + "#" + tag.slice(namespace.length + 1));
+          }
+        }
+      }
+    }
+    return [...identities];
+  };
+  const globalSetup = preview ? setupExports(project.createSourceFile(preview, await fs.readFile(path.join(root, preview), "utf8"))) : [];
   for (const file of files) {
     const stat = await fs.stat(path.join(root, file));
     if (stat.size > 200000) continue;
@@ -87,7 +115,8 @@ export async function publishedStories(root: string, packageName: string) {
     }
     if (current && Node.isStringLiteral(current))
       description = current.getLiteralValue();
-    const group = result.get(exported) ?? { description, examples: [] };
+    const group = result.get(exported) ?? { description, examples: [], setup: [] };
+    group.setup = [...new Set([...group.setup, ...globalSetup, ...setupExports(source)])];
     for (const variable of source.getVariableDeclarations()) {
       if (!variable.getVariableStatement()?.isExported()) continue;
       const story = unwrap(variable.getInitializer());

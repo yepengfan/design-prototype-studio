@@ -5,12 +5,13 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createApp } from "../../server/app";
+import AdmZip from "adm-zip";
 import { registryFixture } from "../registry";
 
 test("published types and CSF recipes admit controlled components with their original global setup without custom Studio metadata", async ({
   browser,
 }) => {
-  test.setTimeout(180000);
+  test.setTimeout(300000);
   const root = await fs.mkdtemp(
     path.join(os.tmpdir(), "studio-story-library-"),
   );
@@ -154,6 +155,19 @@ test("published types and CSF recipes admit controlled components with their ori
     await expect(
       page.getByRole("textbox", { name: "Example name" }),
     ).toHaveValue("Blair");
+    const source = {
+      ...data.snapshot.files,
+      "src/pages/Page.tsx": `import {useState} from 'react';import Field,{Provider} from '${name}';export function Page(){const[value,setValue]=useState('');return <Provider><Field value={value} onChange={setValue}/></Provider>}`,
+      "src/Page.stories.tsx": `import {Page} from './pages/Page';export default {title:'Legacy/Name',component:Page};export const Empty={};`,
+    };
+    const zip = new AdmZip();
+    for (const [file, content] of Object.entries(source)) if (file !== "studio.project.json") zip.addFile(file, Buffer.from(content as string));
+    const imported = (await request("/import", { archive: zip.toBuffer().toString("base64"), confirm: true })).data;
+    const original = (await request(`/projects/${imported.state.id}/preview`, { page: imported.snapshot.manifest.pages[0].id })).data;
+    await page.goto(original.url);
+    await page.getByRole("textbox", { name: "Example name" }).fill("Casey");
+    await expect(page.getByRole("textbox", { name: "Example name" })).toHaveValue("Casey");
+    studio.previews.stop(original.id);
     expect(errors).toEqual([]);
     await page.screenshot({
       path: test.info().outputPath("published-controlled-field.png"),

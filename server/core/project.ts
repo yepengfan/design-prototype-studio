@@ -1,5 +1,7 @@
 import { providerSetup, projectSpecifier } from "./providers.js";
 import { readFileSync } from "node:fs";
+import { Project, Node } from "ts-morph";
+import { StudioError } from "./contracts.js";
 import type { Files, Manifest } from "./contracts.js";
 
 export const runtimeVersions = {
@@ -161,6 +163,43 @@ export function synchronizeRuntime(input: Files, manifest: Manifest): Files {
     if (page)
       files["src/main.tsx"] =
         `// Studio launcher\nimport { createRoot } from 'react-dom/client';\nimport { ${page.export} as Page } from './${page.file.replace(/^src\//, "").replace(/\.tsx?$/, "")}';\n${manifest.styles.map((s) => `import ${JSON.stringify(projectSpecifier(s, "../"))};`).join("\n")}\n${provider.imports}createRoot(document.getElementById('root')!).render(${provider.wrap("<Page />")});\n`;
+  }
+  return files;
+}
+
+export function replaceLibraryStyles(input: Files, previous: string[], next: string[]): Files {
+  const obsolete = new Set(previous.filter((style) => !next.includes(style)));
+  const files = { ...input };
+  if (!obsolete.size) return files;
+  const project = new Project({ useInMemoryFileSystem: true });
+  for (const [name, source] of Object.entries(files)) {
+    if (/\.[cm]?[jt]sx?$/.test(name)) {
+      const file = project.createSourceFile(name, source);
+      for (const declaration of file.getImportDeclarations()) {
+        if (!obsolete.has(declaration.getModuleSpecifierValue())) continue;
+        if (declaration.getDefaultImport() || declaration.getNamespaceImport() || declaration.getNamedImports().length) {
+          if (next.length !== 1) throw new StudioError("This stylesheet binding needs an explicit replacement from the library release.", 422);
+          declaration.setModuleSpecifier(next[0]);
+        } else {
+          declaration.remove();
+          for (const style of next)
+            if (!file.getImportDeclarations().some((entry) => entry.getModuleSpecifierValue() === style))
+              file.addImportDeclaration({ moduleSpecifier: style });
+        }
+      }
+      for (const literal of file.getDescendants().filter(Node.isStringLiteral)) {
+        if (!obsolete.has(literal.getLiteralValue())) continue;
+        const parent = literal.getParent();
+        if (Node.isExportDeclaration(parent) || (Node.isCallExpression(parent) && ["require", "import"].includes(parent.getExpression().getText()))) {
+          if (next.length !== 1) throw new StudioError("This stylesheet reference needs an explicit replacement from the library release.", 422);
+          literal.setLiteralValue(next[0]);
+        }
+      }
+      files[name] = file.getFullText();
+    } else if (/\.css$/.test(name)) {
+      files[name] = source.replace(/@import\s+(?:url\(\s*)?(["'])([^"']+)\1\s*\)?([^;]*);/g, (statement, _quote, specifier, conditions) =>
+        obsolete.has(specifier) ? next.map((style) => `@import ${JSON.stringify(style)}${conditions.trim() ? " " + conditions.trim() : ""};`).join("\n") : statement);
+    }
   }
   return files;
 }

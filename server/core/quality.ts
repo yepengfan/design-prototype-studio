@@ -13,25 +13,32 @@ export async function checkQuality(
   snapshot: Snapshot,
   previews: Previews,
   screenshots: string,
-  options: { requireReviewed?: boolean } = {},
+  options: { requireReviewed?: boolean; project?: boolean } = {},
 ) {
-  const scope = parseRequirements(snapshot.files, snapshot.manifest.scope);
-  const results: QualityResult[] = [];
+  const scope = parseRequirements(snapshot.files, options.project
+    ? Object.keys(snapshot.files).filter((file) => file.endsWith(".feature"))
+    : snapshot.manifest.scope);
+  const missingBindings = options.project ? snapshot.manifest.scenarios.filter((binding) => !scope.scenarios.some((scenario) => scenario.id === binding.scenario)) : [];
+  if (options.project) scope.scenarios = scope.scenarios.filter((scenario) => snapshot.manifest.scenarios.some((binding) => binding.scenario === scenario.id));
+  const results: QualityResult[] = missingBindings.map((binding) => ({
+    scenario: binding.scenario, name: binding.scenario, passed: false,
+    failures: ["The saved scenario mapping has no matching Gherkin scenario."],
+  }));
   try {
     await previews.verify(snapshot, true);
   } catch (e) {
     return {
       ready: false,
       designerAcceptanceRequired: true,
-      results: scope.scenarios.map((s) => ({
+      results: [...results, ...(scope.scenarios.length ? scope.scenarios : [{ id: "project", name: "Project validation" }]).map((s) => ({
         scenario: s.id,
         name: s.name,
         passed: false,
         failures: [String(e)],
-      })),
+      }))],
     };
   }
-  if (!scope.scenarios.length)
+  if (!scope.scenarios.length && !options.project)
     return {
       ready: false,
       designerAcceptanceRequired: true,
@@ -55,22 +62,33 @@ export async function checkQuality(
     });
     storybook = await previews.startStorybook(snapshot);
     const react = await previews.start(snapshot);
-    const smoke = await browser.newPage({
-      viewport: { width: 1440, height: 1000 },
-    });
-    const smokeErrors: string[] = [];
-    smoke.on("pageerror", (error) => smokeErrors.push(error.message));
-    smoke.on("console", (message) => {
-      if (message.type() === "error") smokeErrors.push(message.text());
-    });
-    try {
-      await smoke.goto(new URL("/", react.url).href);
-      await smoke.locator("#root > *").first().waitFor();
-      if (smokeErrors.length) throw new Error(smokeErrors.join("; "));
-    } finally {
-      await smoke.close();
-      previews.stop(react.id);
-    }
+    const smokeCheck = async (url: string) => {
+      const page = await browser!.newPage({ viewport: { width: 1440, height: 1000 } });
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
+      try {
+        await page.goto(url);
+        await page.locator("#root > *").first().waitFor();
+        if (errors.length) throw new Error(errors.join("; "));
+      } finally { await page.close(); }
+    };
+    try { await smokeCheck(new URL("/", react.url).href); }
+    finally { previews.stop(react.id); }
+    if (options.project)
+      for (const target of snapshot.manifest.pages) {
+        const result: QualityResult = { scenario: "page:" + target.id, name: target.title, passed: false, failures: [] };
+        results.push(result);
+        let preview: Awaited<ReturnType<Previews["start"]>> | undefined;
+        try {
+          preview = await previews.start(snapshot, undefined, undefined, target.id);
+          await smokeCheck(preview.url);
+          if (snapshot.manifest.generationState !== "unstarted" && !snapshot.manifest.scenarios.some((binding) => binding.page === target.id))
+            result.failures.push("This implemented page has no reviewed scenario mapping.");
+        } catch (error) { result.failures.push(error instanceof Error ? error.message : String(error)); }
+        finally { if (preview) previews.stop(preview.id); }
+        result.passed = !result.failures.length;
+      }
     for (const scenario of scope.scenarios) {
       const result: QualityResult = {
         scenario: scenario.id,
@@ -154,6 +172,7 @@ export async function checkQuality(
     }
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
+    if (!scope.scenarios.length) results.push({ scenario: "project", name: "Project startup", passed: false, failures: [reason] });
     for (const scenario of scope.scenarios) {
       let result = results.find((result) => result.scenario === scenario.id);
       if (!result) {
@@ -175,7 +194,7 @@ export async function checkQuality(
     await browser?.close();
   }
   return {
-    ready: results.every((r) => r.passed),
+    ready: results.length > 0 && results.every((r) => r.passed),
     designerAcceptanceRequired: true,
     results,
   };

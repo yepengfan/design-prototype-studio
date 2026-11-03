@@ -118,7 +118,14 @@ export class Previews {
         result.stdout.slice(0, 12000),
       );
     if (build) {
-      const lint = await this.command("npm", ["run", "lint"], root);
+      const hasLint = JSON.parse(snapshot.files["package.json"]).scripts?.lint;
+      const lint = hasLint
+        ? await this.command("npm", ["run", "lint"], root)
+        : await this.command(process.execPath, [
+            fileURLToPath(new URL("../../node_modules/eslint/bin/eslint.js", import.meta.url)),
+            "--config", fileURLToPath(new URL("../../eslint.config.js", import.meta.url)),
+            "src", "--max-warnings", "0",
+          ], root);
       if (lint.code)
         throw new StudioError("Project lint failed. The project is not deliverable.", 422, lint.stdout.slice(0, 12000));
       const built = await this.command("npm", ["run", "build"], root);

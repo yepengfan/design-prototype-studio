@@ -5,7 +5,7 @@ import { promises as fs } from "node:fs";
 import { z } from "zod";
 import { ProjectStore } from "./core/store.js";
 import { Previews } from "./core/preview.js";
-import { blankProject, synchronizeRuntime } from "./core/project.js";
+import { blankProject, synchronizeRuntime, replaceLibraryStyles } from "./core/project.js";
 import { StudioError, filesSchema, type Run } from "./core/contracts.js";
 import {
   parseRequirements,
@@ -339,7 +339,10 @@ export async function createApp(options: {
       ],
     };
     const candidate = await store.persist(req.params.id, {
-      files: synchronizeRuntime(files, manifest),
+      files: synchronizeRuntime(replaceLibraryStyles(files,
+        [...previousStyles].filter((style) => !manifest.styles.includes(style)),
+        [...new Set(admitted.components.flatMap((component) => component.styles))],
+      ), manifest),
       manifest,
       label: `Library ${body.name}@${body.version}`,
       parent: body.base,
@@ -351,8 +354,8 @@ export async function createApp(options: {
     );
     const upgrading = !!previousLibrary && previousLibrary.version !== body.version;
     const confirmation = digest({ files: candidate.files, manifest });
-    const quality = upgrading && manifest.scope.length
-      ? await checkQuality(candidate, previews, path.join(root, "screenshots"))
+    const quality = upgrading
+      ? await checkQuality(candidate, previews, path.join(root, "screenshots"), { project: true })
       : undefined;
     if (!body.apply) {
       const pages = upgrading ? await Promise.all(manifest.pages.map(async (page) => ({
@@ -456,7 +459,15 @@ export async function createApp(options: {
       await store.navigate(
         req.params.id,
         body.action,
-        (s) => previews.verify(s),
+        async (saved) => {
+          const { snapshot: current } = await store.get(req.params.id);
+          if (body.action !== "restore" && JSON.stringify(saved.manifest.libraries) === JSON.stringify(current.manifest.libraries)) {
+            await previews.verify(saved);
+            return;
+          }
+          const report = await checkQuality(saved, previews, path.join(options.root, "quality", saved.id), { project: true });
+          if (!report.ready) throw new StudioError("The saved revision failed project checks. The current revision was kept. " + report.results.flatMap((result) => result.failures).join("; "), 422, report.results);
+        },
         body.revision,
       ),
     );

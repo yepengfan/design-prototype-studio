@@ -120,15 +120,30 @@ test("upgrade review preserves the pinned page until confirmation and exact rest
     const scenario = parseRequirements(data.snapshot.files, data.snapshot.manifest.scope).scenarios[0];
     const fixture = "src/scenarios/notice.ts";
     const story = "src/pages/Notice.stories.tsx";
-    const manifest = { ...data.snapshot.manifest, scenarios: [{
+    const otherFeature = "requirements/independent.feature";
+    const otherSource = "Feature: Independent\nScenario: Read independent\nGiven an independent notice exists\nThen it remains visible\n";
+    const other = parseRequirements({ [otherFeature]: otherSource }, [otherFeature]).scenarios[0];
+    const manifest = { ...data.snapshot.manifest,
+      scope: [otherFeature],
+      pages: [...data.snapshot.manifest.pages, { id: "other", title: "Independent", file: "src/pages/Other.tsx", export: "Other" }],
+      scenarios: [{
       scenario: scenario.id, page: "page", story: story + "#Read", fixture, accepted: true,
       steps: [
         { step: scenario.steps[0].id, action: "text" as const, role: "article", name: "", value: "Stable notice" },
         { step: scenario.steps[1].id, action: "click" as const, role: "article", name: "" },
         { step: scenario.steps[2].id, action: "text" as const, role: "status", name: "", value: "Acknowledged" },
       ],
+    }, {
+      scenario: other.id, page: "other", story: "src/pages/Other.stories.tsx#Read", fixture, accepted: true,
+      steps: other.steps.map((step) => ({ step: step.id, action: "visible" as const, role: "heading", name: "Independent notice" })),
     }] };
     const files = synchronizeRuntime({ ...data.snapshot.files,
+      [otherFeature]: otherSource,
+      "src/pages/Other.tsx": "export function Other(){return <main><h1>Independent notice</h1></main>}",
+      "src/pages/Other.stories.tsx": "import {Other} from './Other';export default {title:'Independent',component:Other};export const Read={};",
+      "src/main.tsx": data.snapshot.files["src/main.tsx"].replace("// Studio launcher", "// Original launcher") + `\nimport './project.css';`,
+      ".storybook/preview.tsx": data.snapshot.files[".storybook/preview.tsx"].replace("// Studio preview", "// Original preview"),
+      "src/project.css": `@import '${name}/tokens.css';body { font-family: sans-serif; }`,
       [fixture]: "export default {};",
       [story]: `import {Page} from './Page';export default {title:'Notice',component:Page};export const Read={};`,
     }, manifest);
@@ -172,7 +187,7 @@ test("upgrade review preserves the pinned page until confirmation and exact rest
       "rgb(237, 240, 252)",
     );
     expect(impact.quality.ready, JSON.stringify(impact.quality.results)).toBe(true);
-    expect(impact.pages).toHaveLength(1);
+    expect(impact.pages).toHaveLength(2);
     studio.previews.stop(impact.preview.id);
     for (const page of impact.pages) studio.previews.stop(page.id);
     await request(`/projects/${id}/library`, {
@@ -200,6 +215,10 @@ test("upgrade review preserves the pinned page until confirmation and exact rest
     }, true);
     expect(rejected.status).toBe(422);
     expect((await request(`/projects/${id}`)).data.state.head).toBe(upgraded.id);
+    const restoration = await request(`/projects/${id}/history`, { action: "restore", revision: broken.preview.revision }, true);
+    expect(restoration.status).toBe(422);
+    expect((await request(`/projects/${id}`)).data.state.head).toBe(upgraded.id);
+    expect((await request(`/projects/${id}`)).data.snapshot.manifest.scope).toEqual([otherFeature]);
     studio.previews.stop(broken.preview.id);
     for (const page of broken.pages) studio.previews.stop(page.id);
     await request(`/projects/${id}/history`, {

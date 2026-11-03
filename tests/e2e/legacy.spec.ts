@@ -8,6 +8,7 @@ import { anchors, editSource } from "../../server/core/source";
 import { digest } from "../../server/core/files";
 import { createApp } from "../../server/app";
 import { registryFixture } from "../registry";
+import { installProject } from "../../server/core/libraries";
 import { prototypeFixture } from "../prototype";
 
 test("legacy CSF source keeps controllers, providers, decorators and styles through visual, prompt and annotation editing", async ({
@@ -78,6 +79,12 @@ test("legacy CSF source keeps controllers, providers, decorators and styles thro
       path.join(root, "original"),
       registry.base,
     );
+    const packageJson = JSON.parse(prototype.files["package.json"]);
+    delete packageJson.scripts.lint;
+    for (const name of ["eslint", "@eslint/js", "typescript-eslint"]) delete packageJson.devDependencies[name];
+    prototype.files["package.json"] = JSON.stringify(packageJson, null, 2);
+    delete prototype.files["eslint.config.js"];
+    prototype.files["package-lock.json"] = await installProject(path.join(root, "original"), prototype.files, prototype.manifest.libraries, true);
     const zip = new AdmZip();
     const supplied: Record<string, string> = {};
     for (const [file, content] of Object.entries(prototype.files)) {
@@ -136,6 +143,8 @@ test("legacy CSF source keeps controllers, providers, decorators and styles thro
       "src/providers.tsx",
       "src/styles.css",
       "src/Notice.stories.tsx",
+      "package.json",
+      "package-lock.json",
     ])
       expect(imported.snapshot.files[file]).toBe(prototype.files[file]);
     const page = await browser.newPage();
@@ -164,6 +173,13 @@ test("legacy CSF source keeps controllers, providers, decorators and styles thro
     };
     await experience("40px");
     let data = await request(`/projects/${id}`);
+    const status = data.outline[0].nodes.find((node: { tag: string; props: Record<string, unknown> }) => node.tag === "p" && node.props.role === "status");
+    const removal = await request(`/projects/${id}/edit`, {
+      base: data.snapshot.id, page: "page-1",
+      edit: { anchor: status.id, sourceHash: data.outline[0].hash, operation: "remove" },
+    }, true);
+    expect(removal.error).toContain("required interaction");
+    expect((await request(`/projects/${id}`)).snapshot.id).toBe(data.snapshot.id);
     const main = data.outline[0].nodes.find(
       (node: { tag: string }) => node.tag === "main",
     );
