@@ -88,9 +88,14 @@ test("optional components retain render-recipe providers or report insertion set
           await expect(notice).toHaveCSS("color", "rgb(31, 83, 119)");
           await expect(notice).toHaveCSS("padding", "17px");
           const image = await notice.evaluate((node) => getComputedStyle(node).backgroundImage);
-          const asset = image.match(/url\("?([^"\)]+)/)?.[1];
+          const asset = image.match(/url\("?([^")]+)/)?.[1];
           expect(asset).toBeTruthy();
-          expect((await page.request.get(asset!)).status()).toBe(200);
+          expect(await page.evaluate((url) => new Promise<number>((resolve) => {
+            const image = new Image();
+            image.onload = () => resolve(image.naturalWidth);
+            image.onerror = () => resolve(0);
+            image.src = url;
+          }), asset!)).toBe(2);
         } finally { await vite.close(); }
       } else {
         expect(insertion.status).toBe(422);
