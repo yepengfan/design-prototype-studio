@@ -77,7 +77,7 @@ it("retains public global stylesheet assets and diagnoses unexported setup", asy
     await write("index.js", "export const unused=0;");
     await write("index.d.ts", `export interface NoticeProps {\n/** Surface tone. */\ntone?:string;}\n/** A notice. */\nexport declare function Notice(props:NoticeProps):any;`);
     await write("Notice.stories.tsx", `import {Notice} from '${name}';export default {component:Notice};export const Default={};`);
-    await write(".storybook/preview.tsx", "import '../theme.css';export default {};");
+    await write(".storybook/preview.tsx", "import type {Theme} from './types-only';import '../theme.css';export default {};");
     await write("theme.css", ".notice{color:rgb(31,83,119)}");
     const admitted = await inspectLibrary(root, name, "1.0.0");
     expect(admitted.components[0].styles).toEqual([name + "/appearance.css"]);
