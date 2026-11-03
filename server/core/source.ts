@@ -1373,7 +1373,15 @@ export function validateCapabilities(files: Files, manifest: Manifest, previous:
       controls.set(occurrence, remaining + (collecting ? 1 : -1));
     }
   };
+  const automaticRuntime = (specifier: string | undefined) => ["react/jsx-runtime", "react/jsx-dev-runtime"].includes(specifier ?? "");
+  const runtimeGap = (file: SourceFile) => new StudioError(`Automatic React runtime factory authoring is unsupported in ${file.getFilePath().slice(1)}. Use JSX or React.createElement source before preview or acceptance.`, 422);
   const inspect = (file: SourceFile, collecting: boolean) => {
+    if (!collecting) for (const declaration of [...file.getImportDeclarations(), ...file.getExportDeclarations()]) {
+      if (declaration.isTypeOnly() || !automaticRuntime(declaration.getModuleSpecifierValue())) continue;
+      const bindings = Node.isImportDeclaration(declaration) ? declaration.getNamedImports() : declaration.getNamedExports();
+      const namespace = Node.isImportDeclaration(declaration) ? declaration.getDefaultImport() || declaration.getNamespaceImport() : !declaration.compilerNode.exportClause || ts.isNamespaceExport(declaration.compilerNode.exportClause);
+      if (namespace || bindings.some((binding) => !binding.isTypeOnly() && ["jsx", "jsxs", "jsxDEV"].includes(binding.getName()))) throw runtimeGap(file);
+    }
     if (!collecting)
       for (const declaration of file.getImportDeclarations()) {
         const specifier = declaration.getModuleSpecifierValue();
@@ -1395,6 +1403,8 @@ export function validateCapabilities(files: Files, manifest: Manifest, previous:
         }
       }
       if (Node.isCallExpression(node)) {
+        const argument = node.getArguments()[0];
+        if (!collecting && ["import", "require"].includes(node.getExpression().getText()) && argument && Node.isStringLiteral(argument) && automaticRuntime(argument.getLiteralValue())) throw runtimeGap(file);
         const callee = reference(node.getExpression());
         if (callee?.module !== "react" || !["createElement", "default.createElement"].includes(callee.exported)) continue;
         const [target, props] = node.getArguments();

@@ -158,7 +158,7 @@ export async function publishedStories(root: string, packageName: string) {
       const content = await fs.readFile(path.join(root, file), "utf8");
       if (Buffer.byteLength(content) > 200000) { gaps.add(`Stylesheet setup in ${file} exceeds the supported published source size.`); return; }
       const source = project.getSourceFile(file) ?? project.createSourceFile(file, content);
-      const specs = [...source.getImportDeclarations().filter((node) => !node.isTypeOnly() && (node.getDefaultImport() || node.getNamespaceImport() || !node.getNamedImports().length || node.getNamedImports().some((binding) => !binding.isTypeOnly()))).map((node) => node.getModuleSpecifierValue()), ...source.getExportDeclarations().filter((node) => !node.isTypeOnly()).flatMap((node) => node.getModuleSpecifierValue() ?? [])];
+      const specs = [...source.getImportDeclarations().filter((node) => !node.isTypeOnly() && (node.getDefaultImport() || node.getNamespaceImport() || !node.getNamedImports().length || node.getNamedImports().some((binding) => !binding.isTypeOnly()))).map((node) => node.getModuleSpecifierValue()), ...source.getExportDeclarations().filter((node) => !node.isTypeOnly() && (!node.getNamedExports().length || node.getNamedExports().some((binding) => !binding.isTypeOnly()))).flatMap((node) => node.getModuleSpecifierValue() ?? [])];
       for (const call of source.getDescendants().filter(Node.isCallExpression)) {
         if (["require", "import"].includes(call.getExpression().getText()) && Node.isStringLiteral(call.getArguments()[0])) specs.push((call.getArguments()[0] as import("ts-morph").StringLiteral).getLiteralValue());
       }

@@ -35,9 +35,11 @@ test("optional components retain render-recipe providers or report insertion set
     for (const reusable of [true, false]) {
       const name = reusable ? "@studio-test/render-notice" : "@studio-test/render-gap";
       await registry.publish({ name, version: "1.0.0", type: "module", types: "./index.d.ts", exports: { ".": { types: "./index.d.ts", default: "./index.js" }, "./appearance.css": "./theme.css" }, peerDependencies: { react: "^19.3.1" } }, {
-        "index.js": `import {createElement as h,createContext,useContext} from 'react';const Context=createContext(false);export function Provider({children}){return h(Context.Provider,{value:true},children)}export function Notice({tone='Ready'}){if(!useContext(Context))throw new Error('Render setup required');return h('aside',{'aria-label':'Published notice',className:'published-notice'},tone)}`,
+        "index.js": `import {jsx} from 'react/jsx-runtime';import {createElement as h,createContext,useContext} from 'react';const Context=createContext(false);export function Provider({children}){return h(Context.Provider,{value:true},children)}export function Notice({tone='Ready'}){if(!useContext(Context))throw new Error('Render setup required');return jsx('aside',{'aria-label':'Published notice',className:'published-notice',children:tone})}`,
         "index.d.ts": `import type {ReactNode} from 'react';export interface NoticeProps {\n/** Surface tone. */\ntone?:string;}\n/** Explain a contextual notice. */\nexport declare function Notice(props:NoticeProps):ReactNode;export declare function Provider(props:{children?:ReactNode;enabled?:boolean}):ReactNode;`,
-        ".storybook/preview.tsx": "import '../theme.css';export default {};",
+        ".storybook/preview.tsx": "export {type Theme} from './types-only';export {type Tokens, themeName} from './theme';export default {};",
+        ".storybook/types-only.d.ts": "export interface Theme {tone:string}",
+        ".storybook/theme.ts": "import '../theme.css';export interface Tokens {color:string};export const themeName='Published';",
         "theme.css": ".published-notice{color:rgb(31,83,119);padding:17px;background-image:url('./assets/tile.svg')}",
         "assets/tile.svg": '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="white"/></svg>',
         "Notice.stories.tsx": `import {Notice,Provider} from '${name}';export default {component:Notice};export const Default={render:${reusable ? "()=> <Provider><Notice/></Provider>" : "()=>{const enabled=true;return <Provider enabled={enabled}><Notice/></Provider>}"}};`,
