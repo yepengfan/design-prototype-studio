@@ -120,6 +120,9 @@ test("delivery results belong to the tested revision across review, remapping an
     await page.getByRole("button", { name: "Reopen test plan review" }).click();
     await expect(page.getByRole("heading", { name: green })).toHaveCount(0);
     await expect(page.locator(".scenario-plan summary")).toContainText("Review needed");
+    await page.locator(".scenario-plan summary").click();
+    await page.getByRole("button", { name: "These checks match the scenario" }).click();
+    await expect(page.locator(".scenario-plan summary")).toContainText("Test plan reviewed");
     await page.getByRole("button", { name: "Run deliverability checks" }).click();
     await expect(page.getByRole("heading", { name: green })).toBeVisible();
     await page.getByRole("button", { name: "Choose existing scenario stories" }).click();
@@ -127,6 +130,9 @@ test("delivery results belong to the tested revision across review, remapping an
     await page.getByLabel("Original story").selectOption("src/Page.stories.tsx#Alternate");
     await page.getByRole("button", { name: "Map this scenario to this story" }).click();
     await expect(page.getByRole("heading", { name: green })).toHaveCount(0);
+    await page.locator(".scenario-plan summary").click();
+    await page.getByRole("button", { name: "These checks match the scenario" }).click();
+    await expect(page.locator(".scenario-plan summary")).toContainText("Test plan reviewed");
     hold = true;
     await page.getByRole("button", { name: "Run deliverability checks" }).click();
     await expect.poll(() => checks).toBe(3);

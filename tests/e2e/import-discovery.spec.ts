@@ -72,7 +72,9 @@ test("legacy import admits documented resolved components through factories, ali
       studio.previews.stop(preview.id);
     };
     await experience();
-    const outline = await (await fetch(origin + `/api/projects/${imported.state.id}`)).json();
+    const current = await fetch(origin + `/api/projects/${imported.state.id}`, { headers: { "X-Studio-Session": secret } });
+    expect(current.status).toBe(200);
+    const outline = await current.json();
     const main = outline.outline[0].nodes.find((node: { tag: string }) => node.tag === "main");
     await request(`/projects/${imported.state.id}/edit`, { base: outline.snapshot.id, page: "page-1", edit: { anchor: main.id, sourceHash: outline.outline[0].hash, operation: "style", value: { padding: 32 } } });
     await experience();
