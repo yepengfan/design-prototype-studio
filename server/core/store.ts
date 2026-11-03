@@ -97,10 +97,19 @@ export class ProjectStore {
   async saveState(state: ProjectState) {
     await atomicJSON(path.join(this.dir(state.id), "state.json"), state);
   }
-  async persist(id: string, input: Omit<Snapshot, "id" | "at">) {
+  async persist(id: string, input: Omit<Snapshot, "id" | "at">, restorationBase?: string) {
     validateFiles(input.files);
     const accepted = input.parent ? await this.snapshot(id, input.parent) : undefined;
-    validateCapabilities(input.files, input.manifest, accepted?.files ?? input.files);
+    const baselines = [accepted?.files ?? input.files];
+    if (restorationBase) {
+      let revision = accepted;
+      while (revision && revision.id !== restorationBase) {
+        revision = revision.parent ? await this.snapshot(id, revision.parent) : undefined;
+        if (revision) baselines.push(revision.files);
+      }
+      if (!revision) throw new StudioError("The restoration baseline is outside accepted history.", 409);
+    }
+    validateCapabilities(input.files, input.manifest, baselines);
     manifestSchema.parse(input.manifest);
     for (const p of input.manifest.pages)
       if (!(p.file in input.files))

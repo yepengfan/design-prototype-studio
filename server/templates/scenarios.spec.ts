@@ -128,17 +128,17 @@ for (const scenario of scenarios)
         { name: step.name, exact: true },
       );
       if (step.action === "click") await target.click();
-      if (step.action === "fill") await target.fill(step.value ?? "");
+      if (step.action === "fill") await target.fill(step.value!);
       if (step.action === "visible") await expect(target).toBeVisible();
       if (step.action === "enabled") await expect(target).toBeEnabled();
       if (step.action === "disabled") await expect(target).toBeDisabled();
       if (step.action === "hidden") await expect(target).toBeHidden();
       if (step.action === "text")
-        await expect(target).toContainText(step.value ?? "");
+        await expect(target).toContainText(step.value!);
       if (step.action === "value")
-        await expect(target).toHaveValue(step.value ?? "");
+        await expect(target).toHaveValue(step.value!);
       if (step.action === "count")
-        await expect(target).toHaveCount(step.count ?? 0);
+        await expect(target).toHaveCount(step.count!);
     }
     expect(errors).toEqual([]);
     await page.screenshot({

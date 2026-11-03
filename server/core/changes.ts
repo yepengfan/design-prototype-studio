@@ -13,7 +13,7 @@ import {
 import { validateFiles, digest, safeRelative } from "./files.js";
 import { parseRequirements } from "./requirements.js";
 import { synchronizeRuntime } from "./project.js";
-import { anchors, validateCapabilities } from "./source.js";
+import { anchors, validateCapabilities, localSourceClosure } from "./source.js";
 import { closureDiagnostics } from "./archive.js";
 
 export const differences = (before: Files, after: Files) =>
@@ -287,30 +287,32 @@ export function prepareChange(
       );
     return !/\.(css|svg|png|jpg|woff2?)$/.test(d.file);
   });
-  if (
-    behavior &&
-    base.manifest.pages.some(
-      (page) =>
-        diff.some((change) => change.file === page.file) &&
-        base.manifest.scenarios.some(
-          (binding) =>
-            binding.page === page.id &&
-            !selectedScenarios.has(binding.scenario),
-        ),
-    )
-  )
+  const pageRoots = (manifest: Manifest, page: Manifest["pages"][number]) => [
+    page.file,
+    ...(page.previewStory ? [page.previewStory.split("#")[0]] : []),
+    ...manifest.scenarios.filter((binding) => binding.page === page.id).flatMap((binding) => [binding.fixture, binding.story.split("#")[0]]),
+    ...(manifest.provider ? [manifest.provider.split("#")[0]] : []),
+  ];
+  const affectedPages = base.manifest.pages.filter((page) => {
+    const dependencies = new Set([
+      ...localSourceClosure(base.files, pageRoots(base.manifest, page)),
+      ...localSourceClosure(files, pageRoots(manifest, manifest.pages.find((candidate) => candidate.id === page.id) ?? page)),
+    ]);
+    return JSON.stringify(page) !== JSON.stringify(manifest.pages.find((candidate) => candidate.id === page.id)) ||
+      base.manifest.provider !== manifest.provider ||
+      JSON.stringify(base.manifest.styles) !== JSON.stringify(manifest.styles) ||
+      diff.some((change) => dependencies.has(change.file));
+  });
+  if (behavior && affectedPages.some((page) =>
+    base.manifest.scenarios.some((binding) => binding.page === page.id && !selectedScenarios.has(binding.scenario))))
     throw new StudioError(
-      "This page also implements requirements outside the current selection. Include its related requirement files before changing its behavior, or leave this proposal pending.",
+      "This change affects pages implementing requirements outside the current selection. Include their related requirement files before changing behavior, or leave this proposal pending.",
       422,
     );
   if (
     !behavior &&
     options.page &&
-    diff.some((change) =>
-      base.manifest.pages.some(
-        (page) => page.id !== options.page && page.file === change.file,
-      ),
-    )
+    affectedPages.some((page) => page.id !== options.page)
   )
     throw new StudioError(
       "This presentation proposal edits another page. Rework it for the designer's current page.",

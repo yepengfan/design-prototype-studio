@@ -153,12 +153,20 @@ function ProjectStudio({ id, setId }: { id: string; setId: (id: string) => void 
         `${c.name} ${c.description} ${c.package}`.toLowerCase().includes(w),
       ),
   );
+  function reconcileScenario(current: string, updated: Data) {
+    return updated.scope.scenarios.some((item) => item.id === current) &&
+      updated.snapshot.manifest.scenarios.some((binding) => binding.scenario === current) ? current : "";
+  }
+  function receiveData(updated: Data) {
+    setData(updated);
+    setScenario((current) => reconcileScenario(current, updated));
+    setPage((current) => updated.outline.some((item) => item.id === current) ? current : updated.outline[0]?.id ?? "");
+  }
   const load = async () => {
     setProjects(await api("/projects"));
     if (id) {
       const d = await api<Data>(`/projects/${id}`);
-      setData(d);
-      if (!page) setPage(d.outline[0]?.id ?? "");
+      receiveData(d);
       return d;
     }
   };
@@ -170,7 +178,7 @@ function ProjectStudio({ id, setId }: { id: string; setId: (id: string) => void 
       await action();
       const updated = await load();
       if (preview && updated && updated.snapshot.id !== previousRevision)
-        await showPreview();
+        await showPreview(undefined, 0, updated.outline.some((item) => item.id === page) ? page : updated.outline[0]?.id, reconcileScenario(scenario, updated));
     } catch (e) {
       setError(
         e instanceof RequestError
@@ -204,7 +212,7 @@ function ProjectStudio({ id, setId }: { id: string; setId: (id: string) => void 
     if (!id) return;
     const timer = setInterval(() => {
       void api<Data>(`/projects/${id}`)
-        .then(setData)
+        .then(receiveData)
         .catch(() => {});
     }, 1800);
     return () => clearInterval(timer);
@@ -283,7 +291,7 @@ function ProjectStudio({ id, setId }: { id: string; setId: (id: string) => void 
       edit: { anchor: selection, sourceHash: outline.hash, ...values },
     });
     const fresh = await api<Data>(`/projects/${id}`);
-    setData(fresh);
+    receiveData(fresh);
     setSelection(result.selection ?? "");
   }
   async function undoAnnotation(result: string) {
@@ -2505,8 +2513,9 @@ function Quality({
                   binding?.steps.filter((test) => test.step === step.id) ?? []
                 ).map((test, i) => (
                   <p key={i}>
-                    {test.action} “{test.name}”
-                    {test.value ? `: ${test.value}` : ""}
+                    {test.action} {test.role} “{test.name}”
+                    {test.action === "count" ? `: ${test.count === undefined ? "Missing count" : test.count}` :
+                      ["text", "value", "fill"].includes(test.action) ? `: ${test.value === undefined ? "Missing value" : JSON.stringify(test.value)}` : ""}
                   </p>
                 ))}
                 {!binding?.steps.some((test) => test.step === step.id) && (

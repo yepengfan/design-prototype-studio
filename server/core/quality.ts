@@ -145,18 +145,18 @@ export async function checkQuality(
             { name: step.name, exact: true },
           );
           if (step.action === "click") await target.click();
-          if (step.action === "fill") await target.fill(step.value ?? "");
+          if (step.action === "fill") await target.fill(step.value!);
           if (step.action === "visible")
             await target.waitFor({ state: "visible" });
           if (step.action === "enabled") await expect(target).toBeEnabled();
           if (step.action === "disabled") await expect(target).toBeDisabled();
           if (step.action === "hidden") await expect(target).toBeHidden();
           if (step.action === "text")
-            await expect(target).toContainText(step.value ?? "");
+            await expect(target).toContainText(step.value!);
           if (step.action === "count")
-            await expect(target).toHaveCount(step.count ?? 0);
+            await expect(target).toHaveCount(step.count!);
           if (step.action === "value")
-            await expect(target).toHaveValue(step.value ?? "");
+            await expect(target).toHaveValue(step.value!);
         }
         result.screenshot = `${scenario.id}.png`;
         await page.screenshot({

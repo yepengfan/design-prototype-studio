@@ -273,7 +273,8 @@ function setupIdentities(components: Component[], provider?: string, files: File
 function behaviorOwner(element: Element, setups: Set<string>) {
   const tag = opening(element).getTagNameNode();
   const origin = reference(tag);
-  if (origin && setups.has(origin.local ?? origin.module + "#" + origin.exported)) return true;
+  if (origin && (setups.has(origin.local ?? origin.module + "#" + origin.exported) ||
+      (origin.module === "react" && ["Context", "Context.Provider"].includes(origin.exported)))) return true;
   if (["form", "fieldset", "label"].includes(tag.getText()) || behaviorAttributes(element)) return true;
   if (tag.getText() !== "legend") return false;
   const fieldset = element.getAncestors().find(jsx);
@@ -994,6 +995,16 @@ function replacementControl(tag: string, properties: { name?: string; value?: un
     });
 }
 
+function localSpecifiers(file: SourceFile) {
+  return [
+      ...file.getImportDeclarations().map((declaration) => declaration.getModuleSpecifierValue()),
+      ...file.getExportDeclarations().map((declaration) => declaration.getModuleSpecifierValue()),
+      ...file.getDescendants().filter(Node.isCallExpression).filter((call) => ["import", "require"].includes(call.getExpression().getText())).map((call) => {
+        const argument = call.getArguments()[0];
+        return argument && Node.isStringLiteral(argument) ? argument.getLiteralValue() : undefined;
+      }),
+  ];
+}
 function sourceClosure(project: Project, files: Files, manifest: Manifest) {
   const roots = [
     ...Object.keys(files).filter((name) => name.startsWith("src/") || /\.stories\.[cm]?[jt]sx?$/.test(name) || /^\.storybook\/preview\.[cm]?[jt]sx?$/.test(name)),
@@ -1008,18 +1019,28 @@ function sourceClosure(project: Project, files: Files, manifest: Manifest) {
     const file = pending.pop()!;
     if (accepted.has(file)) continue;
     accepted.add(file);
-    const specifiers = [
-      ...file.getImportDeclarations().map((declaration) => declaration.getModuleSpecifierValue()),
-      ...file.getExportDeclarations().map((declaration) => declaration.getModuleSpecifierValue()),
-      ...file.getDescendants().filter(Node.isCallExpression).filter((call) => ["import", "require"].includes(call.getExpression().getText())).map((call) => {
-        const argument = call.getArguments()[0];
-        return argument && Node.isStringLiteral(argument) ? argument.getLiteralValue() : undefined;
-      }),
-    ];
-    for (const specifier of specifiers) {
+    for (const specifier of localSpecifiers(file)) {
       if (!specifier?.startsWith(".")) continue;
       const name = resolveLocal(files, file.getFilePath().slice(1), specifier);
       const dependency = name && project.getSourceFile("/" + name);
+      if (dependency) pending.push(dependency);
+    }
+  }
+  return accepted;
+}
+export function localSourceClosure(files: Files, roots: string[]) {
+  const project = sourceProject(files);
+  const accepted = new Set<string>();
+  const pending = [...roots];
+  while (pending.length) {
+    const name = pending.pop()!;
+    if (accepted.has(name)) continue;
+    accepted.add(name);
+    const file = project.getSourceFile("/" + name);
+    if (!file) continue;
+    for (const specifier of localSpecifiers(file)) {
+      if (!specifier?.startsWith(".")) continue;
+      const dependency = resolveLocal(files, name, specifier);
       if (dependency) pending.push(dependency);
     }
   }
@@ -1057,8 +1078,16 @@ function controlExecutionContext(node: Node) {
     try { return ts.createPrinter({removeComments:true}).printNode(ts.EmitHint.Unspecified, transformed.transformed[0], file.compilerNode); }
     finally { transformed.dispose(); }
   };
-  const functions = node.getAncestors().filter((parent) => Node.isFunctionDeclaration(parent) || Node.isArrowFunction(parent) || Node.isFunctionExpression(parent) || Node.isMethodDeclaration(parent));
+  const functions = node.getAncestors().filter((parent) => Node.isFunctionDeclaration(parent) || Node.isArrowFunction(parent) || Node.isFunctionExpression(parent) || Node.isMethodDeclaration(parent) || Node.isClassDeclaration(parent));
   const guards = node.getAncestors().flatMap((parent) => {
+    if (Node.isCallExpression(parent)) return [runtimeSyntax(parent)];
+    if (Node.isJsxElement(parent) || Node.isJsxAttribute(parent)) {
+      const owner = Node.isJsxElement(parent) ? parent.getOpeningElement() : parent.getAncestors().find((ancestor) => Node.isJsxOpeningElement(ancestor) || Node.isJsxSelfClosingElement(ancestor));
+      if (Node.isJsxOpeningElement(owner) || Node.isJsxSelfClosingElement(owner)) {
+        const attributes = owner.getAttributes().filter((attribute) => !Node.isJsxAttribute(attribute) || !["style", "className"].includes(attribute.getNameNode().getText()));
+        if (attributes.length) return [owner.getTagNameNode().getText(), ...attributes.map(runtimeSyntax)];
+      }
+    }
     if (Node.isConditionalExpression(parent)) return [syntax(parent.getCondition()), node.getStart() < parent.getWhenFalse().getStart() ? "true-branch" : "false-branch"];
     if (Node.isBinaryExpression(parent) && [SyntaxKind.AmpersandAmpersandToken, SyntaxKind.BarBarToken, SyntaxKind.QuestionQuestionToken].includes(parent.getOperatorToken().getKind()))
       return [syntax(parent.getLeft()), parent.getOperatorToken().getText()];
@@ -1067,9 +1096,81 @@ function controlExecutionContext(node: Node) {
   });
   return [guards, functions.map(runtimeSyntax), file.getVariableStatements().map(runtimeSyntax)];
 }
-export function validateCapabilities(files: Files, manifest: Manifest, previous: Files = files) {
+function localFunction(node: Node, seen = new Set<Node>()): Node | undefined {
+  if (seen.has(node)) return undefined;
+  seen.add(node);
+  if (Node.isFunctionDeclaration(node) || Node.isArrowFunction(node) || Node.isFunctionExpression(node) || Node.isMethodDeclaration(node) || Node.isClassDeclaration(node)) return node;
+  if (Node.isParenthesizedExpression(node) || Node.isAsExpression(node) || Node.isSatisfiesExpression(node)) return localFunction(node.getExpression(), seen);
+  if (Node.isVariableDeclaration(node) || Node.isExportAssignment(node)) {
+    const input = Node.isVariableDeclaration(node) ? node.getInitializer() : node.getExpression();
+    return input && localFunction(input, seen);
+  }
+  if (Node.isCallExpression(node)) {
+    const callee = reference(node.getExpression());
+    if (callee?.module === "react" && ["memo", "forwardRef", "default.memo", "default.forwardRef"].includes(callee.exported)) {
+      const input = node.getArguments()[0];
+      return input && localFunction(input, seen);
+    }
+  }
+  const symbol = node.getSymbol();
+  for (const declaration of (symbol?.getAliasedSymbol() ?? symbol)?.getDeclarations() ?? []) {
+    const found = localFunction(declaration, seen);
+    if (found) return found;
+  }
+  return undefined;
+}
+function invocationContexts(files: Iterable<SourceFile>) {
+  const calls = new Map<Node, Node[]>();
+  for (const file of files) for (const node of file.getDescendants()) {
+    let target: Node | undefined;
+    if (Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) target = node.getTagNameNode();
+    if (Node.isCallExpression(node)) {
+      const callee = reference(node.getExpression());
+      target = callee?.module === "react" && ["createElement", "default.createElement"].includes(callee.exported) ? node.getArguments()[0] : node.getExpression();
+    }
+    if (!target && Node.isIdentifier(node)) {
+      const parent = node.getParent();
+      if (node.getAncestors().some((ancestor) => Node.isImportDeclaration(ancestor) || Node.isExportDeclaration(ancestor)) ||
+          ((Node.isFunctionDeclaration(parent) || Node.isFunctionExpression(parent) || Node.isClassDeclaration(parent) || Node.isVariableDeclaration(parent) || Node.isParameterDeclaration(parent)) && parent.getNameNode() === node) ||
+          (Node.isVariableDeclaration(parent) && parent.getInitializer() === node) ||
+          Node.isJsxOpeningElement(parent) || Node.isJsxClosingElement(parent) || Node.isJsxSelfClosingElement(parent) ||
+          (Node.isCallExpression(parent) && (parent.getExpression() === node ||
+            (parent.getArguments()[0] === node && reference(parent.getExpression())?.module === "react" &&
+              ["createElement", "default.createElement"].includes(reference(parent.getExpression())!.exported))))) continue;
+      target = node;
+    }
+    const fn = target && localFunction(target);
+    if (fn) calls.set(fn, [...(calls.get(fn) ?? []), node]);
+  }
+  const signature = (call: Node) => {
+    if (Node.isJsxOpeningElement(call) || Node.isJsxSelfClosingElement(call))
+      return call.getAttributes().filter((attribute) => !Node.isJsxAttribute(attribute) || !["style", "className"].includes(attribute.getNameNode().getText())).map(syntax);
+    if (Node.isCallExpression(call)) {
+      const callee = reference(call.getExpression());
+      if (callee?.module === "react" && ["createElement", "default.createElement"].includes(callee.exported)) {
+        const [, props, ...children] = call.getArguments();
+        return [props && Node.isObjectLiteralExpression(props)
+          ? props.getProperties().filter((property) => !Node.isPropertyAssignment(property) || !["style", "className"].includes(property.getName())).map(syntax)
+          : props ? syntax(props) : null, children.map(syntax)];
+      }
+    }
+    return syntax(Node.isIdentifier(call) ? call.getParentOrThrow() : call);
+  };
+  const context = (node: Node, seen = new Set<Node>()): unknown[][] => {
+    let fn: Node | undefined = node.getAncestors().find((parent) => Node.isFunctionDeclaration(parent) || Node.isArrowFunction(parent) || Node.isFunctionExpression(parent) || Node.isMethodDeclaration(parent));
+    if (fn && Node.isMethodDeclaration(fn) && Node.isClassDeclaration(fn.getParent())) fn = fn.getParent();
+    if (!fn) return [[]];
+    if (!calls.has(fn)) return context(fn, seen);
+    if (seen.has(fn)) throw new StudioError("Recursive local control invocation cannot be preserved safely. Resolve this compatibility gap before acceptance.", 422);
+    const next = new Set([...seen, fn]);
+    return calls.get(fn)!.flatMap((call) => context(call, next).map((parents) => [
+      [call.getSourceFile().getFilePath(), lexicalIdentity(call), controlExecutionContext(call), signature(call)], ...parents,
+    ]));
+  };
+  return context;
+}
+export function validateCapabilities(files: Files, manifest: Manifest, previous: Files | Files[] = files) {
   const project = sourceProject(files);
-  const baseline = previous === files ? project : sourceProject(previous);
   const allowed = new Set([
     ...setupIdentities(manifest.libraries.flatMap((library) => library.components), manifest.provider, files),
     ...manifest.libraries.flatMap((library) => library.components.map((component) => component.package + "#" + component.export)),
@@ -1085,14 +1186,17 @@ export function validateCapabilities(files: Files, manifest: Manifest, previous:
       throw new StudioError(`Library capability ${origin.module}#${origin.exported} is not admitted. Ask the library maintainer for documented setup and examples in an updated release.`, 422);
   };
   const controls = new Map<string, number>();
+  let invocations: ReturnType<typeof invocationContexts>;
   const nativeControl = (file: SourceFile, expression: Node, tag: string, properties: ControlProperty[], collecting: boolean) => {
     if (!replacementControl(tag, properties)) return;
     const key = JSON.stringify([file.getFilePath(), lexicalIdentity(expression), controlExecutionContext(expression), tag,
       properties.filter((property) => !["style", "className"].includes(property.name ?? "")).map((property) => [property.name, property.value === undefined ? property.expression : property.value])]);
-    const remaining = controls.get(key) ?? 0;
-    if (!collecting && !remaining)
-      throw new StudioError(`The proposal invents a ${tag} control. Studio must use the admitted library capability.`, 422);
-    controls.set(key, remaining + (collecting ? 1 : -1));
+    for (const occurrence of [key, ...invocations(expression).filter((context) => context.length).map((context) => JSON.stringify([key, context]))]) {
+      const remaining = controls.get(occurrence) ?? 0;
+      if (!collecting && !remaining)
+        throw new StudioError(`The proposal invents a ${tag} control or changes its preserved execution or invocation context. Studio must use the admitted library capability.`, 422);
+      controls.set(occurrence, remaining + (collecting ? 1 : -1));
+    }
   };
   const inspect = (file: SourceFile, collecting: boolean) => {
     if (!collecting)
@@ -1136,6 +1240,17 @@ export function validateCapabilities(files: Files, manifest: Manifest, previous:
       }
     }
   };
-  for (const file of sourceClosure(baseline, previous, manifest)) inspect(file, true);
-  for (const file of sourceClosure(project, files, manifest)) inspect(file, false);
+  const preserved = new Map<string, number>();
+  for (const prior of Array.isArray(previous) ? previous : [previous]) {
+    controls.clear();
+    const closure = sourceClosure(prior === files ? project : sourceProject(prior), prior, manifest);
+    invocations = invocationContexts(closure);
+    for (const file of closure) inspect(file, true);
+    for (const [key, count] of controls) preserved.set(key, Math.max(preserved.get(key) ?? 0, count));
+  }
+  controls.clear();
+  for (const [key, count] of preserved) controls.set(key, count);
+  const closure = sourceClosure(project, files, manifest);
+  invocations = invocationContexts(closure);
+  for (const file of closure) inspect(file, false);
 }

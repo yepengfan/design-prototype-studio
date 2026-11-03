@@ -310,7 +310,7 @@ export class Annotations {
         activeAnnotationResults: [...survivingResults].filter(
           (id) => !skipped.has(id),
         ),
-      });
+      }, base.id);
       await this.verify(candidate);
       state.head = candidate.id;
       state.redo = [];
