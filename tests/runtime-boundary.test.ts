@@ -21,6 +21,11 @@ const forms = [
   { name: "computed namespace", definition: "import * as automatic from 'react/jsx-runtime';const make=automatic['jsx'];", call: "make(TARGET,{children:'Confirm'})" },
   { name: "re-export", definition: "import {make} from '../../runtime';", call: "make(TARGET,{children:'Confirm'})", helper: "export {jsx as make} from 'react/jsx-runtime';" },
   { name: "star re-export", definition: "import {jsx as make} from '../../runtime';", call: "make(TARGET,{children:'Confirm'})", helper: "export * from 'react/jsx-runtime';" },
+  { name: "quoted import", definition: `import {"jsx" as make} from 'react/jsx-runtime';`, call: "make(TARGET,{children:'Confirm'})" },
+  { name: "quoted re-export", definition: "import {make} from '../../runtime';", call: "make(TARGET,{children:'Confirm'})", helper: `export {"jsx" as make} from 'react/jsx-runtime';` },
+  { name: "namespace re-export", definition: "import {automatic} from '../../runtime';", call: "automatic.jsx(TARGET,{children:'Confirm'})", helper: "export * as automatic from 'react/jsx-runtime';" },
+  { name: "require erased cast", definition: "const {jsx:make}=require(('react/jsx-runtime' as const));", call: "make(TARGET,{children:'Confirm'})" },
+  { name: "require template", definition: "const {jsx:make}=require(`react/jsx-runtime`);", call: "make(TARGET,{children:'Confirm'})" },
   { name: "require", definition: "const {jsx:make}=require('react/jsx-runtime');", call: "make(TARGET,{children:'Confirm'})" },
 ];
 function render(files: Files) {

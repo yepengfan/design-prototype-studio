@@ -1380,7 +1380,11 @@ export function validateCapabilities(files: Files, manifest: Manifest, previous:
       if (declaration.isTypeOnly() || !automaticRuntime(declaration.getModuleSpecifierValue())) continue;
       const bindings = Node.isImportDeclaration(declaration) ? declaration.getNamedImports() : declaration.getNamedExports();
       const namespace = Node.isImportDeclaration(declaration) ? declaration.getDefaultImport() || declaration.getNamespaceImport() : !declaration.compilerNode.exportClause || ts.isNamespaceExport(declaration.compilerNode.exportClause);
-      if (namespace || bindings.some((binding) => !binding.isTypeOnly() && ["jsx", "jsxs", "jsxDEV"].includes(binding.getName()))) throw runtimeGap(file);
+      const factories = bindings.some((binding) => {
+        const name = binding.getNameNode();
+        return !binding.isTypeOnly() && ["jsx", "jsxs", "jsxDEV"].includes(Node.isStringLiteral(name) ? name.getLiteralValue() : name.getText());
+      });
+      if (namespace || factories) throw runtimeGap(file);
     }
     if (!collecting)
       for (const declaration of file.getImportDeclarations()) {
@@ -1403,8 +1407,12 @@ export function validateCapabilities(files: Files, manifest: Manifest, previous:
         }
       }
       if (Node.isCallExpression(node)) {
-        const argument = node.getArguments()[0];
-        if (!collecting && ["import", "require"].includes(node.getExpression().getText()) && argument && Node.isStringLiteral(argument) && automaticRuntime(argument.getLiteralValue())) throw runtimeGap(file);
+        if (!collecting && ["import", "require"].includes(node.getExpression().getText())) {
+          let argument = node.getArguments()[0];
+          while (argument && (Node.isParenthesizedExpression(argument) || Node.isAsExpression(argument) || Node.isSatisfiesExpression(argument) || Node.isNonNullExpression(argument) || Node.isTypeAssertion(argument))) argument = argument.getExpression();
+          const specifier = argument && (Node.isStringLiteral(argument) || Node.isNoSubstitutionTemplateLiteral(argument)) ? argument.getLiteralValue() : undefined;
+          if (automaticRuntime(specifier)) throw runtimeGap(file);
+        }
         const callee = reference(node.getExpression());
         if (callee?.module !== "react" || !["createElement", "default.createElement"].includes(callee.exported)) continue;
         const [target, props] = node.getArguments();
