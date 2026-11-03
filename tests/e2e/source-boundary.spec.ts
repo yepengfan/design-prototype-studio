@@ -36,6 +36,10 @@ test("publication preserves native render uses through values, aliases, wrappers
   const factory = `h('button',{onClick:${handler}},'Confirm')`;
   const cases = [
     { name: "direct", definitions: "", use: button },
+    { name: "direct JSX child", definitions: `function Slot({children}){return <aside>{children}</aside>}`, use: `<Slot>${button}</Slot>`, consumer: "children", factoryConsumer: false },
+    { name: "inline JSX slot", definitions: `function Slot({header}){return <aside>{header}</aside>}`, use: `<Slot header={${button}}/>`, consumer: "header", factoryConsumer: false },
+    { name: "direct factory child", definitions: `function Slot({children}){return h('aside',null,children)}`, use: `{h(Slot,null,${factory})}`, consumer: "children", factoryConsumer: true },
+    { name: "inline factory slot", definitions: `function Slot({header}){return h('aside',null,header)}`, use: `{h(Slot,{header:${factory}})}`, consumer: "header", factoryConsumer: true },
     { name: "wrapper", definitions: `function Legacy(){return ${button}}`, use: "<Legacy/>" },
     { name: "wrapper alias", definitions: `function Legacy(){return ${button}}const Alias=Legacy;`, use: "<Alias/>" },
     { name: "value", definitions: `const action=${button};`, use: "{action}" },
@@ -90,6 +94,35 @@ test("publication preserves native render uses through values, aliases, wrappers
           snapshot = (await response.json()).snapshot;
           await render(2);
         }
+      }
+      if (fixture.consumer) {
+        if (fixture.factoryConsumer) {
+          const current = snapshot.files["src/pages/Page.tsx"];
+          snapshot = (await studio.store.commit(id, snapshot.id, { ...snapshot.files, "src/pages/Page.tsx": current.replace("h('aside',null,", "h('aside',{style:{padding:24}},") }, snapshot.manifest, "Consumer spacing")).snapshot;
+        } else {
+          const styled = await request(id, snapshot, "style", "aside", { value: { padding: 24 } });
+          expect(styled.status, fixture.name + " consumer style").toBe(200);
+          snapshot = styled.body.snapshot;
+          const wrapped = await request(id, snapshot, "wrap", "aside", { layout: "grid" });
+          expect(wrapped.status, fixture.name + " consumer layout").toBe(200);
+          snapshot = wrapped.body.snapshot;
+        }
+        await render(2);
+        const current = snapshot.files["src/pages/Page.tsx"];
+        const duplicated = fixture.factoryConsumer ? current.replace(`,${fixture.consumer})`, `,${fixture.consumer},${fixture.consumer})`) : current.replace(`{${fixture.consumer}}</aside>`, `{${fixture.consumer}}{${fixture.consumer}}</aside>`);
+        const accepted = snapshot;
+        snapshot = { ...snapshot, id: "unchecked-consumption", files: { ...snapshot.files, "src/pages/Page.tsx": duplicated } };
+        await render(4);
+        snapshot = accepted;
+        await render(2);
+        const pending = await studio.store.get(id);
+        pending.state.runs.push({ id: "consumer-change", base: snapshot.id, page: "page", adapter: "codex", prompt: "Repeat the consumer", status: "review", events: [],
+          proposal: { kind: "business", summary: "Repeat the consumer", files: { "src/pages/Page.tsx": duplicated, "requirements/notice.feature": snapshot.files["requirements/notice.feature"].replace("available", "repeated") }, questions: [], affectedScenarios: [] } });
+        await studio.store.saveState(pending.state);
+        const response = await fetch(`${origin}/api/projects/${id}/runs/consumer-change/apply`, { method: "POST", headers: { "Content-Type": "application/json", "X-Studio-Session": secret }, body: "{}" });
+        expect(response.status, fixture.name + " consumer publication").toBe(422);
+        expect((await response.json()).error).toMatch(/control|preserv|compatibility/);
+        expect((await studio.store.get(id)).snapshot).toEqual(snapshot);
       }
       const rejected = await request(id, snapshot, "duplicate", "section");
       expect(rejected.status, fixture.name).toBe(422);

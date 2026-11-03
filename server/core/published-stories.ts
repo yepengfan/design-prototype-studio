@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { Project, Node, type Expression } from "ts-morph";
+import { Project, Node, type Expression, type SourceFile } from "ts-morph";
 import { literalValue } from "./source.js";
 import type { Component } from "./contracts.js";
 
@@ -39,10 +39,8 @@ export async function publishedStories(root: string, packageName: string) {
     }
   }
   const project = new Project({ useInMemoryFileSystem: true });
-  const result = new Map<
-    string,
-    { description?: string; examples: Component["examples"]; setup: string[]; provider?: string; insertionGap?: string }
-  >();
+  type StoryGroup = { description?: string; examples: Component["examples"]; setup: string[]; provider?: string; insertionGap?: string };
+  const result = new Map<string, StoryGroup>();
   const unwrap = (input: Expression | undefined): Expression | undefined => {
     while (
       input &&
@@ -53,51 +51,97 @@ export async function publishedStories(root: string, packageName: string) {
       input = input.getExpression();
     return input;
   };
-  const setupExports = (source: import("ts-morph").SourceFile) => {
+  const setupExports = (source: SourceFile, render?: { expression: Node; component: import("typescript").Symbol | undefined; props: Record<string, unknown>; argsKnown: boolean }) => {
     const identities = new Set<string>();
     const providers: string[] = [];
     let unsafe = false;
-    for (const property of source.getDescendants().filter(Node.isPropertyAssignment)) {
+    let reason: string | undefined;
+    let children: string | undefined;
+    const recipes: Node[] = [];
+    if (render) recipes.push(render.expression);
+    else for (const property of source.getDescendants().filter(Node.isPropertyAssignment)) {
       if (property.getName() !== "decorators") continue;
       const decorators = unwrap(property.getInitializer());
       if (!decorators || !Node.isArrayLiteralExpression(decorators)) { unsafe = true; continue; }
-      for (const decorator of decorators.getElements()) {
-        if (!Node.isArrowFunction(decorator) && !Node.isFunctionExpression(decorator)) { unsafe = true; continue; }
-        const recipe: string[] = [];
-        let body: Node | undefined = decorator.getBody();
-        if (Node.isBlock(body)) {
-          const statements = body.getStatements();
-          body = statements.length === 1 && Node.isReturnStatement(statements[0]) ? statements[0].getExpression() : undefined;
-        }
-        const story = decorator.getParameters()[0]?.getNameNode().getSymbol()?.compilerSymbol;
-        if (!story) { unsafe = true; continue; }
-        for (const wrapper of decorator.getDescendants().filter(Node.isJsxElement)) {
-          if (!wrapper.getDescendants().some((node) =>
-            (Node.isJsxSelfClosingElement(node) || Node.isJsxOpeningElement(node)) && Node.isIdentifier(node.getTagNameNode()) && node.getTagNameNode().getSymbol()?.compilerSymbol === story)) continue;
-          const tag = wrapper.getOpeningElement().getTagNameNode().getText();
-          for (const declaration of source.getImportDeclarations()) {
-            if (declaration.getModuleSpecifierValue() !== packageName) continue;
-            const named = declaration.getNamedImports().find((binding) => (binding.getAliasNode()?.getText() ?? binding.getName()) === tag);
-            const namespace = declaration.getNamespaceImport()?.getText();
-            const identity = named ? packageName + "#" + named.getName() : declaration.getDefaultImport()?.getText() === tag ? packageName + "#default" : namespace && tag.startsWith(namespace + ".") ? packageName + "#" + tag.slice(namespace.length + 1) : undefined;
-            if (identity) {
-              identities.add(identity);
-              const children = wrapper.getJsxChildren().filter((child) => !Node.isJsxText(child) || child.getText().trim());
-              const child = children[0];
-              const bound = named?.getAliasNode() ?? named?.getNameNode() ?? declaration.getDefaultImport() ?? declaration.getNamespaceImport();
-              let root: Node = wrapper.getOpeningElement().getTagNameNode();
-              while (Node.isPropertyAccessExpression(root)) root = root.getExpression();
-              if (body === wrapper && wrapper.getOpeningElement().getAttributes().length === 0 && children.length === 1 && child && Node.isJsxSelfClosingElement(child) && child.getTagNameNode().getSymbol()?.compilerSymbol === story && child.getAttributes().length === 0 && root.getSymbol()?.compilerSymbol === bound?.getSymbol()?.compilerSymbol && !identity.split("#")[1].includes(".")) recipe.push(identity);
-            }
+      recipes.push(...decorators.getElements());
+    }
+    for (const recipe of recipes) {
+      if (!Node.isArrowFunction(recipe) && !Node.isFunctionExpression(recipe)) { unsafe = true; reason = "The setup is not a direct inline function."; continue; }
+      let body: Node | undefined = recipe.getBody();
+      if (Node.isBlock(body)) {
+        const statements = body.getStatements();
+        body = statements.length === 1 && Node.isReturnStatement(statements[0]) ? statements[0].getExpression() : undefined;
+        if (!body) reason = "The setup requires local initialization statements.";
+      }
+      if (body && (Node.isParenthesizedExpression(body) || Node.isAsExpression(body) || Node.isSatisfiesExpression(body))) body = unwrap(body);
+      const parameter = recipe.getParameters()[0]?.getNameNode().getSymbol()?.compilerSymbol;
+      const childBinding = render ? render.component : parameter;
+      const leaf = (node: Node | undefined) => {
+        if (!node || (!Node.isJsxElement(node) && !Node.isJsxSelfClosingElement(node))) return false;
+        const op = Node.isJsxElement(node) ? node.getOpeningElement() : node;
+        if (!childBinding || op.getTagNameNode().getSymbol()?.compilerSymbol !== childBinding) return false;
+        if (!render) return Node.isJsxSelfClosingElement(node) && op.getAttributes().length === 0;
+        const props: Record<string, unknown> = {};
+        for (const attribute of op.getAttributes()) {
+          if (Node.isJsxSpreadAttribute(attribute)) {
+            if (!parameter || attribute.getExpression().getSymbol()?.compilerSymbol !== parameter || !render.argsKnown) { reason = "The component spreads runtime properties that cannot be serialized for insertion."; return false; }
+            Object.assign(props, render.props);
+          } else {
+            const initializer = attribute.getInitializer();
+            const expression = initializer && Node.isJsxExpression(initializer) ? initializer.getExpression() : initializer;
+            const value = initializer ? literalValue(expression) : true;
+            if (value === undefined) { reason = "The component uses runtime property values that cannot be serialized for insertion."; return false; }
+            props[attribute.getNameNode().getText()] = value;
           }
         }
-        if (recipe.length === 1) providers.push(recipe[0]);
-        else unsafe = true;
+        if (props.children !== undefined) {
+          if (typeof props.children !== "string") return false;
+          children = props.children;
+          delete props.children;
+        }
+        if (Node.isJsxElement(node)) {
+          let text = "";
+          let hasContent = false;
+          for (const child of node.getJsxChildren()) {
+            if (Node.isJsxText(child)) { text += child.getText(); hasContent ||= !!child.getText().trim(); }
+            else if (Node.isJsxExpression(child) && typeof literalValue(child.getExpression()) === "string") { text += literalValue(child.getExpression()); hasContent = true; }
+            else return false;
+          }
+          if (hasContent) children = text.trim();
+        }
+        for (const key of Object.keys(render.props)) delete render.props[key];
+        Object.assign(render.props, props);
+        return true;
+      };
+      if (render && leaf(body)) continue;
+      if (!childBinding) { unsafe = true; continue; }
+      let provider: string | undefined;
+      for (const wrapper of recipe.getDescendants().filter(Node.isJsxElement)) {
+        if (!wrapper.getDescendants().some((node) =>
+          (Node.isJsxSelfClosingElement(node) || Node.isJsxOpeningElement(node)) && node.getTagNameNode().getSymbol()?.compilerSymbol === childBinding)) continue;
+        const tag = wrapper.getOpeningElement().getTagNameNode();
+        for (const declaration of source.getImportDeclarations()) {
+          if (declaration.getModuleSpecifierValue() !== packageName) continue;
+          const named = declaration.getNamedImports().find((binding) => (binding.getAliasNode()?.getText() ?? binding.getName()) === tag.getText());
+          const namespace = declaration.getNamespaceImport()?.getText();
+          const identity = named ? packageName + "#" + named.getName() : declaration.getDefaultImport()?.getText() === tag.getText() ? packageName + "#default" : namespace && tag.getText().startsWith(namespace + ".") ? packageName + "#" + tag.getText().slice(namespace.length + 1) : undefined;
+          if (!identity) continue;
+          identities.add(identity);
+          if (wrapper.getOpeningElement().getAttributes().length) reason = `Provider ${identity} requires attributes that the reusable default-provider setup does not carry.`;
+          const content = wrapper.getJsxChildren().filter((child) => !Node.isJsxText(child) || child.getText().trim());
+          const bound = named?.getAliasNode() ?? named?.getNameNode() ?? declaration.getDefaultImport() ?? declaration.getNamespaceImport();
+          let root: Node = tag;
+          while (Node.isPropertyAccessExpression(root)) root = root.getExpression();
+          if (body === wrapper && wrapper.getOpeningElement().getAttributes().length === 0 && content.length === 1 && leaf(content[0]) && root.getSymbol()?.compilerSymbol === bound?.getSymbol()?.compilerSymbol && !identity.split("#")[1].includes(".")) provider = identity;
+        }
       }
+      if (provider) providers.push(provider);
+      else { unsafe = true; reason ??= "The setup is not a direct component inside one reusable default provider."; }
     }
-    return { identities: [...identities], provider: !unsafe && providers.length === 1 ? providers[0] : undefined, gap: unsafe || providers.length > 1 };
+    if (providers.length > 1) reason = "The setup requires more than one provider wrapper.";
+    return { identities: [...identities], provider: !unsafe && providers.length === 1 ? providers[0] : undefined, gap: unsafe || providers.length > 1, children, reason };
   };
-  const globalSetup = preview ? setupExports(project.createSourceFile(preview, await fs.readFile(path.join(root, preview), "utf8"))) : { identities: [], provider: undefined, gap: false };
+  const globalSetup = preview ? setupExports(project.createSourceFile(preview, await fs.readFile(path.join(root, preview), "utf8"))) : { identities: [], provider: undefined, gap: false, reason: undefined };
   for (const file of files) {
     const stat = await fs.stat(path.join(root, file));
     if (stat.size > 200000) continue;
@@ -133,30 +177,34 @@ export async function publishedStories(root: string, packageName: string) {
     if (current && Node.isStringLiteral(current))
       description = current.getLiteralValue();
     const localSetup = setupExports(source);
-    const provider = globalSetup.provider ?? localSetup.provider;
-    const group = result.get(exported) ?? { description, examples: [], setup: [], provider };
-    if (globalSetup.gap || localSetup.gap || (globalSetup.provider && localSetup.provider) || group.provider !== provider)
-      group.insertionGap = "The published decorators require setup that cannot be carried into insertion unambiguously. Ask the library maintainer for a documented reusable provider or use a prompt retaining the published setup.";
-    group.setup = [...new Set([...group.setup, ...globalSetup.identities, ...localSetup.identities])];
+    const group: StoryGroup = result.get(exported) ?? { description, examples: [], setup: [] };
     for (const variable of source.getVariableDeclarations()) {
       if (!variable.getVariableStatement()?.isExported()) continue;
       const story = unwrap(variable.getInitializer());
       if (!story || !Node.isObjectLiteralExpression(story)) continue;
-      const args = story.getProperty("args");
       const props: Record<string, unknown> = {};
-      const expression =
-        args && Node.isPropertyAssignment(args)
-          ? args.getInitializer()
-          : undefined;
-      if (expression && Node.isObjectLiteralExpression(expression))
-        for (const property of expression.getProperties()) {
-          if (!Node.isPropertyAssignment(property)) continue;
-          const value = literalValue(property.getInitializer());
-          if (value !== undefined) props[property.getName()] = value;
-        }
+      let argsKnown = true;
+      for (const owner of [meta, story]) {
+        const args = owner.getProperty("args");
+        if (!args) continue;
+        const value = Node.isPropertyAssignment(args) ? literalValue(unwrap(args.getInitializer())) : undefined;
+        if (!value || typeof value !== "object" || Array.isArray(value)) argsKnown = false;
+        else Object.assign(props, value);
+      }
+      const render = story.getProperty("render") ?? meta.getProperty("render");
+      const expression = render && Node.isPropertyAssignment(render) ? unwrap(render.getInitializer()) : render;
+      const binding = component && Node.isPropertyAssignment(component) ? component.getInitializer()?.getSymbol()?.compilerSymbol : undefined;
+      const renderSetup = expression ? setupExports(source, { expression, component: binding, props, argsKnown }) : { identities: [], provider: undefined, gap: false, children: typeof props.children === "string" ? props.children : undefined, reason: undefined };
+      const providers = [globalSetup.provider, localSetup.provider, renderSetup.provider].filter((provider): provider is string => !!provider);
+      const provider = providers.length === 1 ? providers[0] : undefined;
+      if (globalSetup.gap || localSetup.gap || renderSetup.gap || (!render && !argsKnown) || providers.length > 1 || (group.examples.length && group.provider !== provider))
+        group.insertionGap = render ? `The published render recipe ${file}#${variable.getName()} requires setup that cannot be carried into insertion unambiguously. ${renderSetup.reason ?? localSetup.reason ?? globalSetup.reason ?? "Its examples require inconsistent or multiple setup wrappers."} Keep its original render setup through a prompt, or ask the library maintainer for a reusable documented provider and example.` : "The published decorators require setup that cannot be carried into insertion unambiguously. Ask the library maintainer for a documented reusable provider or use a prompt retaining the published setup.";
+      if (!group.examples.length) group.provider = provider;
+      group.setup = [...new Set([...group.setup, ...globalSetup.identities, ...localSetup.identities, ...renderSetup.identities])];
       group.examples.push({
         name: variable.getName(),
         props,
+        children: renderSetup.children,
         story: { file, export: variable.getName(), annotations: preview },
         source: content,
       });

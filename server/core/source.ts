@@ -1271,16 +1271,20 @@ function nativeRenderUses(input: Iterable<SourceFile>, components: Component[]) 
     if (execution.has(node)) return execution.get(node)!;
     const result = node.getAncestors().flatMap((ancestor) => {
     let inputs: Node[] = [];
+    let consumer: Node | undefined;
+    if (jsx(ancestor)) consumer = opening(ancestor).getTagNameNode();
     if (Node.isConditionalExpression(ancestor)) inputs = [ancestor.getCondition()];
     else if (Node.isIfStatement(ancestor)) inputs = [ancestor.getExpression()];
     else if (Node.isBinaryExpression(ancestor) && [SyntaxKind.AmpersandAmpersandToken, SyntaxKind.BarBarToken, SyntaxKind.QuestionQuestionToken].includes(ancestor.getOperatorToken().getKind())) inputs = [ancestor.getLeft()];
     else if (Node.isCallExpression(ancestor)) {
       const callee = reference(ancestor.getExpression());
-      inputs = callee?.module === "react" && ["createElement", "default.createElement"].includes(callee.exported) ? ancestor.getArguments().slice(1, 2) : [ancestor];
+      const factory = callee?.module === "react" && ["createElement", "default.createElement"].includes(callee.exported);
+      inputs = factory ? ancestor.getArguments().slice(1, 2) : [ancestor];
+      if (factory) consumer = ancestor.getArguments()[0];
     }
-    return inputs.flatMap((input) => [input, ...input.getDescendants()].filter(Node.isIdentifier)
+    return [...dependencies(consumer), ...inputs.flatMap((input) => [input, ...input.getDescendants()].filter(Node.isIdentifier)
       .filter((identifier) => !identifier.getAncestors().some((parent) => jsx(parent) && input.getStart() <= parent.getStart() && parent.getEnd() <= input.getEnd()))
-      .flatMap((identifier) => dependencies(identifier)));
+      .flatMap((identifier) => dependencies(identifier)))];
     });
     execution.set(node, result);
     return result;
