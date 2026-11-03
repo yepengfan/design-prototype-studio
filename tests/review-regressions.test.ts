@@ -312,6 +312,8 @@ it("uses decorator parameter bindings and rejects unrelated or shadowed control 
   for (const name of ["Story", "RenderStory", "View"]) {
     const source = `export const Example={decorators:[(${name})=><section><${name}/></section>]};`;
     expect(() => validateCapabilities({ ...files, "src/Example.stories.tsx": source }, manifest)).not.toThrow();
+    const assigned = `const wrap=(${name})=><section><${name}/></section>;export const Example={decorators:[wrap]};`;
+    expect(() => validateCapabilities({ ...files, "src/Example.stories.tsx": assigned }, manifest)).not.toThrow();
   }
   for (const source of [
     `export const Example={decorators:[(View,Context)=><Context/>]};`,
@@ -335,5 +337,68 @@ it("applies one replacement-control policy to JSX and React factories across acc
       expect(() => propose(`export function Control(){return <div onClick={acknowledge}>Confirm</div>}`)).toThrow("invents");
       expect(() => propose(`export function Control(){return <main><p role="status">Ready</p></main>}`)).not.toThrow();
     }
+  }
+}, 30000);
+it("rejects wrap, remove and duplication that change disabled-fieldset legend context", () => {
+  for (const operation of ["wrap", "remove", "duplicate"] as const) {
+    const source = operation === "remove"
+      ? `export function Page(){return <fieldset disabled><legend>Title</legend><legend><input/></legend></fieldset>}`
+      : `export function Page(){return <fieldset disabled><legend><input/></legend></fieldset>}`;
+    expect(() => edit(source, "legend", { operation })).toThrow("ownership");
+  }
+  const functions = `export function Page(){return <main><p>Notice</p></main>}export function Other(){return <section></section>}`;
+  const destination = anchors(functions).find((node) => node.tag === "section")!;
+  expect(() => edit(functions, "p", { operation: "move", parent: destination.id })).toThrow("ownership");
+  const source = `export function Page(){return <main><fieldset disabled><legend><input/></legend></fieldset></main>}`;
+  expect(render(edit(source, "fieldset", { operation: "wrap" }), {})).toContain('<section style="display:flex;flex-direction:column;gap:16px"><fieldset disabled=""><legend><input/></legend></fieldset></section>');
+});
+it("uses admitted provider binding identities for aliases, setup records and project providers", () => {
+  for (const binding of [
+    `import {Provider} from '@fixture/cards';const P=Provider;`,
+    `import {Provider as Theme} from '@fixture/cards';const P=(Theme);`,
+    `import * as DS from '@fixture/cards';const {Provider:P}=DS;`,
+  ]) for (const fromSetup of [false, true]) for (const slot of [undefined, "header"]) for (const inward of [false, true]) {
+    const source = `${binding}import {Card} from '@fixture/cards';export function Page(){return <main>${inward ? '<Card>Moved</Card><P><Card header={null}></Card></P>' : '<P><Card>Moved</Card></P><Card header={null}></Card>'}</main>}`;
+    const component = { ...card, ...(fromSetup ? { setup: ["@fixture/cards#Provider"] } : { provider: "@fixture/cards#Provider" }) };
+    const nodes = anchors(source, [component]);
+    const selected = nodes.find((node) => node.text === "Moved")!;
+    const destination = nodes.find((node) => node.tag === "Card" && node.text !== "Moved")!;
+    expect(() => editSource(source, { anchor: selected.id, sourceHash: digest(source), operation: "move", parent: destination.id, slot }, [component])).toThrow("ownership");
+  }
+  const source = `import {Provider} from '../providers';import {Card} from '@fixture/cards';const P=Provider;export function Page(){return <main><P><Card>Moved</Card><section></section></P><aside></aside></main>}`;
+  const context = { file: "src/pages/Page.tsx", files: { "src/providers.tsx": "export function Provider({children}){return <div>{children}</div>}" }, provider: "src/providers.tsx#Provider" };
+  const selected = anchors(source, [card]).find((node) => node.tag === "Card")!;
+  const destination = anchors(source).find((node) => node.tag === "aside")!;
+  expect(() => editSource(source, { anchor: selected.id, sourceHash: digest(source), operation: "move", parent: destination.id }, [card], context)).toThrow("ownership");
+  expect(() => editSource(source, { anchor: selected.id, sourceHash: digest(source), operation: "move", parent: destination.id }, [card], { ...context, provider: "src/providers#Provider" })).toThrow("ownership");
+  const sameOwner = anchors(source).find((node) => node.tag === "section")!;
+  expect(() => editSource(source, { anchor: selected.id, sourceHash: digest(source), operation: "move", parent: sameOwner.id }, [card], context)).not.toThrow();
+}, 60000);
+it("validates dependencies outside src and preserves only real controls with matching identity and multiplicity", () => {
+  for (const extension of ["js", "jsx", "ts", "tsx"]) {
+    const project = blankProject("Closure");
+    const source = extension.endsWith("x") ? "export function Control(){return <button>Confirm</button>}" : "import {createElement as h} from 'react';export function Control(){return h('button',null,'Confirm')}";
+    const files = { ...project.files,
+      "src/pages/Page.tsx": `import {Control} from '../../components/Control';export function Page(){return <Control/>}`,
+      [`components/Control.${extension}`]: source,
+    };
+    expect(() => validateCapabilities(files, project.manifest, project.files)).toThrow("invents");
+    expect(() => validateCapabilities(files, project.manifest, files)).not.toThrow();
+    const dependency = `import {Hidden} from 'unadmitted-controls';export function Control(){return <Hidden/>}`;
+    expect(() => validateCapabilities({ ...files, [`components/Control.${extension}`]: dependency }, project.manifest)).toThrow("unadmitted package");
+  }
+  for (const factory of [false, true]) {
+    const project = blankProject("Occurrences");
+    const expression = factory ? `h('button',null,'Confirm')` : `<button>Confirm</button>`;
+    const imports = factory ? `import {createElement as h} from 'react';` : "";
+    for (const dormant of [`// ${expression}\n`, `const dormant=${JSON.stringify(expression)};`]) {
+      const previous = { ...project.files, "src/pages/Page.tsx": `${imports}${dormant}export function Page(){return <main/>}` };
+      const current = { ...previous, "src/pages/Page.tsx": `${imports}export function Page(){return ${expression}}` };
+      expect(() => validateCapabilities(current, project.manifest, previous)).toThrow("invents");
+    }
+    const previous = { ...project.files, "src/pages/Page.tsx": `${imports}export function Page(){return ${expression}}` };
+    const doubled = factory ? `h('main',null,${expression},${expression})` : `<main>${expression}${expression}</main>`;
+    expect(() => validateCapabilities({ ...previous, "src/pages/Page.tsx": `${imports}export function Page(){return ${doubled}}` }, project.manifest, previous)).toThrow("invents");
+    expect(() => validateCapabilities({ ...previous, "src/pages/Page.tsx": `${imports}export function Different(){return ${expression}}export function Page(){return <Different/>}` }, project.manifest, previous)).toThrow("invents");
   }
 }, 30000);

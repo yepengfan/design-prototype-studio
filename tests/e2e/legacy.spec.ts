@@ -83,7 +83,7 @@ test("legacy CSF source keeps controllers, providers, decorators and styles thro
     prototype.files["src/pages/Page.tsx"] = prototype.files["src/pages/Page.tsx"]
       .replace('<Button type="submit"', '<span onClick={()=>setName(name.trim())}><Button type="submit"')
       .replace('Acknowledge</Button>', 'Acknowledge</Button></span>')
-      .replace('</form>', '</form><fieldset disabled><legend><Input aria-label="Legend field"/></legend><section></section></fieldset>');
+      .replace('</form>', '</form><fieldset disabled><legend><Input aria-label="Legend field"/></legend><section></section></fieldset><fieldset disabled><legend>Cosmetic title</legend><legend><Input aria-label="Promoted field"/></legend></fieldset>');
     const packageJson = JSON.parse(prototype.files["package.json"]);
     delete packageJson.scripts.lint;
     for (const name of ["eslint", "@eslint/js", "typescript-eslint"]) delete packageJson.devDependencies[name];
@@ -194,6 +194,15 @@ test("legacy CSF source keeps controllers, providers, decorators and styles thro
     for (const [anchor, parent] of [[button.id, form.id], [labelledInput.id, form.id], [legendInput.id, fieldsetRegion.id]]) {
       const refused = await request(`/projects/${id}/edit`, {
         base: data.snapshot.id, page: "page-1", edit: { anchor, parent, operation: "move", sourceHash: data.outline[0].hash },
+      }, true);
+      expect(refused.error).toContain("ownership");
+      expect((await request(`/projects/${id}`)).snapshot.id).toBe(data.snapshot.id);
+    }
+    const firstLegend = nodes.find((node: { id: string }) => node.id === legendInput.parent);
+    const removableLegend = nodes.find((node: { tag: string; text?: string }) => node.tag === "legend" && node.text === "Cosmetic title");
+    for (const [anchor, operation] of [[firstLegend.id, "wrap"], [removableLegend.id, "remove"], [firstLegend.id, "duplicate"]]) {
+      const refused = await request(`/projects/${id}/edit`, {
+        base: data.snapshot.id, page: "page-1", edit: { anchor, operation, sourceHash: data.outline[0].hash },
       }, true);
       expect(refused.error).toContain("ownership");
       expect((await request(`/projects/${id}`)).snapshot.id).toBe(data.snapshot.id);

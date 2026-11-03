@@ -1,11 +1,13 @@
 import {
   Project,
+  ts,
   SyntaxKind,
   Node,
   type JsxElement,
   type JsxSelfClosingElement,
   type SourceFile,
 } from "ts-morph";
+import { resolveLocal } from "./archive.js";
 import { providerSetup } from "./providers.js";
 import { componentReference } from "./component-reference.js";
 import { digest } from "./files.js";
@@ -245,10 +247,82 @@ export type Edit = {
   layout?: "flow" | "stack" | "grid";
   confirmedBusiness?: boolean;
 };
-export function editSource(
+type SourceContext = { files?: Files; file?: string; provider?: string };
+function sourceProject(files: Files) {
+  const project = new Project({ useInMemoryFileSystem: true, compilerOptions: { jsx: 4, moduleResolution: 100, allowJs: true } });
+  for (const [name, source] of Object.entries(files))
+    if (/\.[cm]?[jt]sx?$/.test(name)) project.createSourceFile("/" + name, source);
+  return project;
+}
+function syntax(node: Node) {
+  return ts.createPrinter({ removeComments: true }).printNode(ts.EmitHint.Unspecified, node.compilerNode, node.getSourceFile().compilerNode);
+}
+function behaviorAttributes(element: Element) {
+  return opening(element).getAttributes().some((attribute) =>
+    Node.isJsxSpreadAttribute(attribute) || (Node.isJsxAttribute(attribute) &&
+      (/^on[A-Z]/.test(attribute.getNameNode().getText()) ||
+        ["role", "aria-live", "hidden", "inert", "disabled", "ref", "form", "required", "name"].includes(attribute.getNameNode().getText()))));
+}
+function setupIdentities(components: Component[], provider?: string, files: Files = {}) {
+  return new Set([provider, ...components.flatMap((component) => [component.provider, ...(component.setup ?? [])])]
+    .filter((value): value is string => !!value).map((value) => {
+      const [module, exported = "default"] = value.split("#");
+      return (module.startsWith("src/") ? resolveLocal(files, "entry.ts", "./" + module) ?? module : module) + "#" + exported;
+    }));
+}
+function behaviorOwner(element: Element, setups: Set<string>) {
+  const tag = opening(element).getTagNameNode();
+  const origin = reference(tag);
+  if (origin && setups.has(origin.local ?? origin.module + "#" + origin.exported)) return true;
+  if (["form", "fieldset", "label"].includes(tag.getText()) || behaviorAttributes(element)) return true;
+  if (tag.getText() !== "legend") return false;
+  const fieldset = element.getAncestors().find(jsx);
+  return !!fieldset && opening(fieldset).getTagNameNode().getText() === "fieldset" &&
+    nodes(fieldset.getSourceFile()).find((candidate) => opening(candidate).getTagNameNode().getText() === "legend" && candidate.getAncestors().find(jsx) === fieldset) === element;
+}
+function ownership(element: Element, setups: Set<string>) {
+  return element.getAncestors().filter(jsx).filter((ancestor) => behaviorOwner(ancestor, setups));
+}
+function ownershipStates(file: SourceFile, setups: Set<string>) {
+  const states = new Map<string, Map<string, number>>();
+  for (const node of nodes(file)) {
+    const key = syntax(node);
+    const owners = ownership(node, setups).map((owner) => {
+      const op = opening(owner);
+      const origin = reference(op.getTagNameNode());
+      return [origin?.local ?? (origin?.module ? origin.module + "#" + origin.exported : op.getTagNameNode().getText()),
+        op.getAttributes().filter((attribute) => !Node.isJsxAttribute(attribute) || !["style", "className"].includes(attribute.getNameNode().getText())).map(syntax)];
+    });
+    const context = JSON.stringify([lexicalIdentity(node), owners, opening(node).getTagNameNode().getText() === "legend" ? behaviorOwner(node, setups) : null]);
+    const counts = states.get(key) ?? new Map<string, number>();
+    counts.set(context, (counts.get(context) ?? 0) + 1);
+    states.set(key, counts);
+  }
+  return states;
+}
+export function editSource(source: string, edit: Edit, components: Component[], context: SourceContext = {}) {
+  const result = editSourceUnchecked(source, edit, components, context);
+  if (["move", "wrap", "remove", "duplicate", "insert"].includes(edit.operation)) {
+    const name = context.file ?? "page.tsx";
+    const setups = setupIdentities(components, context.provider, { ...context.files, [name]: source });
+    const before = ownershipStates(sourceProject({ ...context.files, [name]: source }).getSourceFileOrThrow("/" + name), setups);
+    const after = ownershipStates(sourceProject({ ...context.files, [name]: result }).getSourceFileOrThrow("/" + name), setups);
+    for (const [key, next] of after) {
+      const prior = before.get(key);
+      if (!prior) continue;
+      const delta = [...next.values()].reduce((a, b) => a + b, 0) - [...prior.values()].reduce((a, b) => a + b, 0);
+      if ([...next].some(([owner, count]) => !prior.has(owner) || (delta <= 0 && count > prior.get(owner)!)) ||
+          (delta >= 0 && [...prior].some(([owner, count]) => (next.get(owner) ?? 0) < count)))
+        throw new StudioError("This edit changes behavioral, provider or fieldset ownership. Use a prompt to review the matching requirements.", 422);
+    }
+  }
+  return result;
+}
+function editSourceUnchecked(
   source: string,
   edit: Edit,
   components: Component[],
+  context: SourceContext,
 ) {
   if (edit.sourceHash !== digest(source))
     throw new StudioError(
@@ -262,7 +336,8 @@ export function editSource(
       "This selection is ambiguous or no longer exists. Select it again.",
       409,
     );
-  const file = parse(source);
+  const name = context.file ?? "page.tsx";
+  const file = sourceProject({ ...context.files, [name]: source }).getSourceFileOrThrow("/" + name);
   const all = nodes(file);
   const node = all.find((n) => n.getStart() === anchor.start)!;
   const op = opening(node);
@@ -277,10 +352,6 @@ export function editSource(
     throw new StudioError(
       "This item repeats or depends on a condition. Use a prompt to preserve the matching scenario behavior.",
     );
-  const behaviorAttributes = (element: Element) => opening(element).getAttributes().some((attribute) =>
-    Node.isJsxSpreadAttribute(attribute) || (Node.isJsxAttribute(attribute) &&
-      (/^on[A-Z]/.test(attribute.getNameNode().getText()) ||
-        ["role", "aria-live", "hidden", "inert", "disabled", "ref", "form", "required", "name"].includes(attribute.getNameNode().getText()))));
   const behaviorBearing = (element: Element) =>
     ["form", "fieldset", "label"].includes(opening(element).getTagNameNode().getText()) || behaviorAttributes(element) ||
     element.getDescendants().some((child) => Node.isJsxExpression(child) &&
@@ -600,34 +671,11 @@ export function editSource(
       node.getDescendants().includes(parent)
     )
       throw new StudioError("Choose a different supported parent container.");
-    const protectedTags = new Set(["form", "fieldset", "label"]);
-    for (const component of components) {
-      for (const setup of [component.provider, ...(component.setup ?? [])]) {
-      if (!setup) continue;
-      const [module, exported = "default"] = setup.split("#");
-      for (const declaration of file.getImportDeclarations().filter((item) => item.getModuleSpecifierValue() === module)) {
-        const named = declaration.getNamedImports().find((item) => item.getName() === exported);
-        const local = named?.getAliasNode()?.getText() ?? named?.getName() ?? (exported === "default" ? declaration.getDefaultImport()?.getText() : undefined);
-        if (local) protectedTags.add(local);
-        const namespace = declaration.getNamespaceImport();
-        if (namespace) protectedTags.add(namespace.getText() + "." + exported);
-      }
-      }
-    }
-    const firstLegend = (element: Element) => {
-      if (opening(element).getTagNameNode().getText() !== "legend") return false;
-      const fieldset = element.getAncestors().find(jsx);
-      return !!fieldset && opening(fieldset).getTagNameNode().getText() === "fieldset" &&
-        all.find((candidate) => opening(candidate).getTagNameNode().getText() === "legend" && candidate.getAncestors().find(jsx) === fieldset) === element;
-    };
-    const protectedNode = (element: Node) => jsx(element) &&
-      (protectedTags.has(opening(element).getTagNameNode().getText()) || behaviorAttributes(element) || firstLegend(element));
-    const owners = (element: Element) => element.getAncestors().filter(protectedNode);
-    const beforeOwners = owners(node);
-    const afterOwners = [...(protectedNode(parent) ? [parent] : []), ...owners(parent)];
-    const movingLegend = opening(node).getTagNameNode().getText() === "legend" &&
-      [node.getAncestors().find(jsx), parent].some((element) => element && opening(element).getTagNameNode().getText() === "fieldset");
-    if (movingLegend || target?.dynamic || beforeOwners.length !== afterOwners.length || beforeOwners.some((owner, index) => owner !== afterOwners[index]))
+    const setups = setupIdentities(components, context.provider, { ...context.files, [name]: source });
+    const beforeOwners = ownership(node, setups);
+    const afterOwners = ownership(parent, setups);
+    if (behaviorOwner(parent, setups)) afterOwners.unshift(parent);
+    if (target?.dynamic || beforeOwners.length !== afterOwners.length || beforeOwners.some((owner, index) => owner !== afterOwners[index]))
       throw new StudioError("This move changes conditional, provider or form ownership. Use a prompt to review the matching requirements.", 422);
     if (edit.slot) {
       if (!target?.component?.slots.includes(edit.slot))
@@ -844,23 +892,8 @@ function removalPatch(node: Element) {
   };
 }
 
-function replacementControl(tag: string, properties: { name?: string; value?: unknown }[]) {
-  const roles = new Set(["button", "checkbox", "combobox", "link", "listbox", "menuitem", "option", "radio", "scrollbar", "searchbox", "slider", "spinbutton", "switch", "tab", "textbox", "treeitem"]);
-  return ["button", "input", "select", "textarea", "dialog", "a", "summary", "details"].includes(tag) ||
-    properties.some(({ name, value }) => {
-      if (!name) return true;
-      if (name === "role") return typeof value !== "string" || roles.has(value);
-      if (tag === "form" && name === "onSubmit") return false;
-      return /^on[A-Z]/.test(name) || ["tabIndex", "contentEditable", "controls"].includes(name);
-    });
-}
-
-export function validateCapabilities(files: Files, manifest: Manifest, previous: Files = files) {
-  const project = new Project({ useInMemoryFileSystem: true, compilerOptions: { jsx: 4, moduleResolution: 100, allowJs: true } });
-  for (const [name, source] of Object.entries(files))
-    if (/\.[cm]?[jt]sx?$/.test(name)) project.createSourceFile("/" + name, source);
-  type Reference = { module: string; exported: string };
-  const reference = (node: Node, seen = new Set<Node>()): Reference | undefined => {
+type Reference = { module: string; exported: string; local?: string };
+function reference(node: Node, seen = new Set<Node>()): Reference | undefined {
     if (seen.has(node)) return undefined;
     seen.add(node);
     if (Node.isParenthesizedExpression(node) || Node.isAsExpression(node) || Node.isNonNullExpression(node))
@@ -880,7 +913,7 @@ export function validateCapabilities(files: Files, manifest: Manifest, previous:
       return undefined;
     }
     if (Node.isFunctionDeclaration(node) || Node.isClassDeclaration(node) || Node.isArrowFunction(node) || Node.isFunctionExpression(node))
-      return { module: "", exported: "" };
+      return { module: "", exported: "", local: node.getSourceFile().getFilePath().slice(1) + "#" + ((Node.isFunctionDeclaration(node) || Node.isClassDeclaration(node)) ? node.getName() ?? "default" : "default") };
     if (Node.isBindingElement(node)) {
       const pattern = node.getParent();
       const declaration = pattern.getParent();
@@ -903,11 +936,19 @@ export function validateCapabilities(files: Files, manifest: Manifest, previous:
     if (Node.isParameterDeclaration(node)) {
       const decorator = node.getParent();
       if ((Node.isArrowFunction(decorator) || Node.isFunctionExpression(decorator)) && decorator.getParameters()[0] === node) {
-        let container: Node = decorator.getParent();
-        while (Node.isParenthesizedExpression(container) || Node.isAsExpression(container) || Node.isSatisfiesExpression(container)) container = container.getParent();
-        const property = container.getParent();
-        if (Node.isArrayLiteralExpression(container) && Node.isPropertyAssignment(property) && property.getName() === "decorators")
-          return { module: "", exported: "" };
+        const inDecorators = (input: Node) => {
+          let container: Node = input.getParentOrThrow();
+          while (Node.isParenthesizedExpression(container) || Node.isAsExpression(container) || Node.isSatisfiesExpression(container)) container = container.getParentOrThrow();
+          const property = container.getParent();
+          return Node.isArrayLiteralExpression(container) && Node.isPropertyAssignment(property) && property.getName() === "decorators";
+        };
+        if (inDecorators(decorator)) return { module: "", exported: "" };
+        const declaration = decorator.getParent();
+        if (Node.isVariableDeclaration(declaration)) {
+          const binding = declaration.getNameNode().getSymbol()?.compilerSymbol;
+          if (binding && node.getSourceFile().getDescendants().filter(Node.isIdentifier).some((identifier) => identifier.getSymbol()?.compilerSymbol === binding && inDecorators(identifier)))
+            return { module: "", exported: "" };
+        }
       }
     }
     if (Node.isVariableDeclaration(node)) {
@@ -924,13 +965,13 @@ export function validateCapabilities(files: Files, manifest: Manifest, previous:
         const named = declaration.getNamedExports().find((item) => (item.getAliasNode()?.getText() ?? item.getName()) === exported);
         if (named) {
           const found = reference(named, seen);
-          if (found) return found;
+          if (found) return found.module ? found : { ...found, local: target!.getFilePath().slice(1) + "#" + exported };
         }
       }
       const declarations = target?.getExportedDeclarations().get(exported) ?? [];
       for (const value of declarations) {
         const found = reference(value, seen);
-        if (found) return found;
+        if (found) return found.module ? found : { ...found, local: target!.getFilePath().slice(1) + "#" + exported };
       }
       return undefined;
     }
@@ -940,40 +981,106 @@ export function validateCapabilities(files: Files, manifest: Manifest, previous:
         if (found) return found;
       }
     return undefined;
-  };
-  const allowed = new Set(manifest.libraries.flatMap((library) => library.components.flatMap((component) => [
-    component.package + "#" + component.export,
-    ...(component.setup ?? []),
-    ...(component.provider ? [component.provider.includes("#") ? component.provider : component.provider + "#default"] : []),
-  ])));
-  if (manifest.provider) allowed.add(manifest.provider.includes("#") ? manifest.provider : manifest.provider + "#default");
+  }
+
+function replacementControl(tag: string, properties: { name?: string; value?: unknown }[]) {
+  const roles = new Set(["button", "checkbox", "combobox", "link", "listbox", "menuitem", "option", "radio", "scrollbar", "searchbox", "slider", "spinbutton", "switch", "tab", "textbox", "treeitem"]);
+  return ["button", "input", "select", "textarea", "dialog", "a", "summary", "details"].includes(tag) ||
+    properties.some(({ name, value }) => {
+      if (!name) return true;
+      if (name === "role") return typeof value !== "string" || roles.has(value);
+      if (tag === "form" && name === "onSubmit") return false;
+      return /^on[A-Z]/.test(name) || ["tabIndex", "contentEditable", "controls"].includes(name);
+    });
+}
+
+function sourceClosure(project: Project, files: Files, manifest: Manifest) {
+  const roots = [
+    ...Object.keys(files).filter((name) => name.startsWith("src/") || /\.stories\.[cm]?[jt]sx?$/.test(name) || /^\.storybook\/preview\.[cm]?[jt]sx?$/.test(name)),
+    ...manifest.pages.flatMap((page) => [page.file, ...(page.previewStory ? [page.previewStory.split("#")[0]] : [])]),
+    ...manifest.scenarios.flatMap((scenario) => [scenario.fixture, scenario.story.split("#")[0]]),
+    ...(manifest.provider ? [manifest.provider.split("#")[0]] : []),
+    ...[...(files["index.html"] ?? "").matchAll(/<script\b[^>]*\bsrc=["']\/?([^"']+)["']/g)].map((match) => match[1]),
+  ];
+  const accepted = new Set<SourceFile>();
+  const pending = roots.map((name) => project.getSourceFile("/" + name)).filter((file): file is SourceFile => !!file);
+  while (pending.length) {
+    const file = pending.pop()!;
+    if (accepted.has(file)) continue;
+    accepted.add(file);
+    const specifiers = [
+      ...file.getImportDeclarations().map((declaration) => declaration.getModuleSpecifierValue()),
+      ...file.getExportDeclarations().map((declaration) => declaration.getModuleSpecifierValue()),
+      ...file.getDescendants().filter(Node.isCallExpression).filter((call) => ["import", "require"].includes(call.getExpression().getText())).map((call) => {
+        const argument = call.getArguments()[0];
+        return argument && Node.isStringLiteral(argument) ? argument.getLiteralValue() : undefined;
+      }),
+    ];
+    for (const specifier of specifiers) {
+      if (!specifier?.startsWith(".")) continue;
+      const name = resolveLocal(files, file.getFilePath().slice(1), specifier);
+      const dependency = name && project.getSourceFile("/" + name);
+      if (dependency) pending.push(dependency);
+    }
+  }
+  return accepted;
+}
+type ControlProperty = { name?: string; value?: unknown; expression?: string };
+function lexicalIdentity(node: Node) {
+  return node.getAncestors().filter((ancestor) => Node.isFunctionDeclaration(ancestor) || Node.isArrowFunction(ancestor) || Node.isFunctionExpression(ancestor) || Node.isMethodDeclaration(ancestor))
+    .map((fn) => {
+      if (Node.isFunctionDeclaration(fn) || Node.isFunctionExpression(fn) || Node.isMethodDeclaration(fn)) return fn.getName() ?? "default";
+      const parent = fn.getParentOrThrow();
+      if (Node.isVariableDeclaration(parent) || Node.isPropertyAssignment(parent)) return parent.getName();
+      return syntax(parent).split("=>")[0];
+    });
+}
+export function validateCapabilities(files: Files, manifest: Manifest, previous: Files = files) {
+  const project = sourceProject(files);
+  const baseline = previous === files ? project : sourceProject(previous);
+  const allowed = new Set([
+    ...setupIdentities(manifest.libraries.flatMap((library) => library.components), manifest.provider, files),
+    ...manifest.libraries.flatMap((library) => library.components.map((component) => component.package + "#" + component.export)),
+  ]);
+  const known = ["react", "react-dom", ...manifest.libraries.map((library) => library.name)];
   const check = (node: Node, intrinsic = false) => {
     const origin = reference(node);
     if (intrinsic && Node.isIdentifier(node) && /^[a-z]/.test(node.getText())) return;
     if (Node.isStringLiteral(node)) return;
-    if (!origin)
-      throw new StudioError(`The component reference ${node.getText()} cannot be identified safely. Use a direct documented import or resolve this source compatibility gap before acceptance.`, 422);
+    if (!origin) throw new StudioError(`The component reference ${node.getText()} cannot be identified safely. Use a direct documented import or resolve this source compatibility gap before acceptance.`, 422);
     if (!origin.module || ["react", "react-dom"].some((module) => origin.module === module || origin.module.startsWith(module + "/"))) return;
     if (!allowed.has(origin.module + "#" + origin.exported))
       throw new StudioError(`Library capability ${origin.module}#${origin.exported} is not admitted. Ask the library maintainer for documented setup and examples in an updated release.`, 422);
   };
-  const nativeControl = (file: SourceFile, expression: Node, tag: string, properties: { name?: string; value?: unknown }[]) => {
-    if (replacementControl(tag, properties) && !previous[file.getFilePath().slice(1)]?.includes(expression.getText()))
+  const controls = new Map<string, number>();
+  const nativeControl = (file: SourceFile, expression: Node, tag: string, properties: ControlProperty[], collecting: boolean) => {
+    if (!replacementControl(tag, properties)) return;
+    const key = JSON.stringify([file.getFilePath(), lexicalIdentity(expression), tag,
+      properties.filter((property) => !["style", "className"].includes(property.name ?? "")).map((property) => [property.name, property.value === undefined ? property.expression : property.value])]);
+    const remaining = controls.get(key) ?? 0;
+    if (!collecting && !remaining)
       throw new StudioError(`The proposal invents a ${tag} control. Studio must use the admitted library capability.`, 422);
+    controls.set(key, remaining + (collecting ? 1 : -1));
   };
-  for (const file of project.getSourceFiles()) {
-    if (!file.getFilePath().startsWith("/src/")) continue;
+  const inspect = (file: SourceFile, collecting: boolean) => {
+    if (!collecting)
+      for (const declaration of file.getImportDeclarations()) {
+        const specifier = declaration.getModuleSpecifierValue();
+        if (!specifier.startsWith(".") && !specifier.startsWith("@storybook/") && !known.some((name) => specifier === name || specifier.startsWith(name + "/")))
+          throw new StudioError(`The proposal uses an unadmitted package: ${specifier}. Import and inspect that library first.`, 422);
+      }
     for (const node of file.getDescendants()) {
       if (Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) {
         const tag = node.getTagNameNode();
-        check(tag, true);
+        if (!collecting) check(tag, true);
         if (Node.isIdentifier(tag) && /^[a-z]/.test(tag.getText())) {
           const expression = Node.isJsxOpeningElement(node) ? node.getParent() : node;
           nativeControl(file, expression, tag.getText(), node.getAttributes().map((attribute) => {
-            if (!Node.isJsxAttribute(attribute)) return {};
+            if (!Node.isJsxAttribute(attribute)) return { expression: syntax(attribute) };
             const initializer = attribute.getInitializer();
-            return { name: attribute.getNameNode().getText(), value: initializer ? literalValue(Node.isJsxExpression(initializer) ? initializer.getExpression() : initializer) : true };
-          }));
+            const input = initializer && Node.isJsxExpression(initializer) ? initializer.getExpression() : initializer;
+            return { name: attribute.getNameNode().getText(), value: initializer ? literalValue(input) : true, expression: input ? syntax(input) : undefined };
+          }), collecting);
         }
       }
       if (Node.isCallExpression(node)) {
@@ -981,19 +1088,22 @@ export function validateCapabilities(files: Files, manifest: Manifest, previous:
         if (callee?.module !== "react" || !["createElement", "default.createElement"].includes(callee.exported)) continue;
         const [target, props] = node.getArguments();
         if (!target) throw new StudioError("The React factory target is missing.", 422);
-        check(target);
+        if (!collecting) check(target);
         if (!Node.isStringLiteral(target)) continue;
-        const properties: { name?: string; value?: unknown }[] = [];
+        const properties: ControlProperty[] = [];
         if (props && props.getKind() !== SyntaxKind.NullKeyword && !(Node.isIdentifier(props) && props.getText() === "undefined")) {
           if (!Node.isObjectLiteralExpression(props)) throw new StudioError("React factory properties cannot be identified safely. Use explicit properties before acceptance.", 422);
           for (const property of props.getProperties()) {
             if ((!Node.isPropertyAssignment(property) && !Node.isShorthandPropertyAssignment(property) && !Node.isMethodDeclaration(property)) || Node.isComputedPropertyName(property.getNameNode()))
               throw new StudioError("React factory properties cannot be identified safely. Use explicit properties before acceptance.", 422);
-            properties.push({ name: property.getName().replace(/^['"]|['"]$/g, ""), value: Node.isPropertyAssignment(property) ? literalValue(property.getInitializer()) : undefined });
+            const input = Node.isPropertyAssignment(property) ? property.getInitializer() : Node.isShorthandPropertyAssignment(property) ? property.getNameNode() : property;
+            properties.push({ name: property.getName().replace(/^['"]|['"]$/g, ""), value: literalValue(input), expression: input ? syntax(input) : undefined });
           }
         }
-        nativeControl(file, node, target.getLiteralValue(), properties);
+        nativeControl(file, node, target.getLiteralValue(), properties, collecting);
       }
     }
-  }
+  };
+  for (const file of sourceClosure(baseline, previous, manifest)) inspect(file, true);
+  for (const file of sourceClosure(project, files, manifest)) inspect(file, false);
 }

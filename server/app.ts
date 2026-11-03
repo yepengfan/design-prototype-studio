@@ -228,6 +228,7 @@ export async function createApp(options: {
           snapshot.files[page.file],
           edit,
           snapshot.manifest.libraries.flatMap((l) => l.components),
+          { files: snapshot.files, file: page.file, provider: snapshot.manifest.provider },
         );
         const files = { ...snapshot.files, [page.file]: source };
         const candidate = await store.persist(req.params.id, {

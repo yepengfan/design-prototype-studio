@@ -376,28 +376,6 @@ export function prepareChange(
       422,
       closure,
     );
-  const known = new Set([
-    "react",
-    "react-dom",
-    "react/jsx-runtime",
-    ...manifest.libraries.map((l) => l.name),
-  ]);
-  for (const [file, source] of Object.entries(files))
-    if (file.startsWith("src/") && /\.[cm]?[jt]sx?$/.test(file)) {
-      const p = new Project({ useInMemoryFileSystem: true });
-      const f = p.createSourceFile(file, source);
-      for (const imp of f.getImportDeclarations()) {
-        const spec = imp.getModuleSpecifierValue();
-        if (
-          !spec.startsWith(".") &&
-          ![...known].some((k) => spec === k || spec.startsWith(k + "/")) &&
-          !spec.startsWith("@storybook/")
-        )
-          throw new StudioError(
-            `The proposal uses an unadmitted package: ${spec}. Import and inspect that library first.`,
-          );
-      }
-    }
   validateCapabilities(files, manifest, base.files);
   const finalFiles = synchronizeRuntime(files, manifest);
   return {

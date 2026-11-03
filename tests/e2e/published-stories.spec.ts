@@ -157,12 +157,22 @@ test("published types and CSF recipes admit controlled components with their ori
     ).toHaveValue("Blair");
     const source = {
       ...data.snapshot.files,
-      "src/pages/Page.tsx": `import {useState} from 'react';import Field,{Provider} from '${name}';export function Page(){const[value,setValue]=useState('');return <Provider><Field value={value} onChange={setValue}/></Provider>}`,
+      "src/pages/Page.tsx": `import {useState} from 'react';import Field,{Provider} from '${name}';const P=Provider;export function Page(){const[value,setValue]=useState('');return <main><P><Field value={value} onChange={setValue}/></P><section></section></main>}`,
       "src/Page.stories.tsx": `import {Page} from './pages/Page';export default {title:'Legacy/Name',component:Page};export const Empty={};`,
     };
     const zip = new AdmZip();
     for (const [file, content] of Object.entries(source)) if (file !== "studio.project.json") zip.addFile(file, Buffer.from(content as string));
     const imported = (await request("/import", { archive: zip.toBuffer().toString("base64"), confirm: true })).data;
+    const current = (await request(`/projects/${imported.state.id}`)).data;
+    const field = current.outline[0].nodes.find((node: { tag: string }) => node.tag === "Field");
+    const destination = current.outline[0].nodes.find((node: { tag: string }) => node.tag === "section");
+    const refused = await request(`/projects/${imported.state.id}/edit`, {
+      base: current.snapshot.id, page: current.outline[0].id,
+      edit: { anchor: field.id, parent: destination.id, sourceHash: current.outline[0].hash, operation: "move" },
+    }, true);
+    expect(refused.status).toBe(422);
+    expect(refused.data.error).toContain("ownership");
+    expect((await request(`/projects/${imported.state.id}`)).data.snapshot.id).toBe(current.snapshot.id);
     const original = (await request(`/projects/${imported.state.id}/preview`, { page: imported.snapshot.manifest.pages[0].id })).data;
     await page.goto(original.url);
     await page.getByRole("textbox", { name: "Example name" }).fill("Casey");
