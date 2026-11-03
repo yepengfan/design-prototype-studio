@@ -333,7 +333,9 @@ export function generationPrompt(snapshot: Snapshot, request: string) {
   return `You are editing a reusable React frontend project for a designer. Return exactly one JSON object matching this schema, with only complete changed/new files in files, explicit removed paths in deleted, and no markdown fences. Omitted files remain unchanged. Use manifestChanges for page/scenario/style/provider changes; do not repeat or alter library metadata or dependency manifests: ${JSON.stringify(z.toJSONSchema(proposalSchema))}\nDo not use tools, commands, file reads, MCP, hooks, delegation or extensions. All context is supplied below. Never invent replacement interactive controls: use genuine admitted library exports. If capabilities, published information or business facts are missing, return kind gap or clarification and questions, with files empty and no deletions. Preserve untouched source, controllers, styling, dependencies and independent scenarios. Never connect independent features without a requirement. Implement all selected Gherkin scenarios with complete initial fixtures, typed replaceable query/operation adapters, validation, interactions, Storybook stories and explicit step bindings. Change business behavior only with a proposed matching .feature difference; presentation-only changes leave Gherkin intact. Unknown business facts require questions before implementing affected behavior. No machine paths, credentials, lifecycle scripts or configuration for agents.\nSelected requirements: ${JSON.stringify(scope)}\nAdmitted libraries and manifest: ${JSON.stringify(snapshot.manifest)}\nCurrent editable source: ${JSON.stringify(source)}\nUnchanged binary/locked artifact inventory: ${JSON.stringify(inventory)}\nDesigner request: ${request}`;
 }
 export class LocalAI {
-  private active = new Map<string, { rpc: RPC; cancel: () => Promise<void> }>();
+  private active = new Map<string, { cancel: () => Promise<void> }>();
+  private cancelled = new Set<string>();
+  private closed = false;
   constructor(
     readonly root: string,
     private diagnostic?: (pid: number, paths?: string[]) => void,
@@ -348,6 +350,31 @@ export class LocalAI {
     snapshot: Snapshot,
     update: (event: string, session?: string, turn?: string) => Promise<void>,
   ): Promise<Proposal> {
+    const controller = new AbortController();
+    let stop: (() => Promise<void>) | undefined;
+    const check = () => {
+      if (this.closed || controller.signal.aborted || this.cancelled.has(run.id))
+        throw new StudioError("Cancelled. Partial output is quarantined.", 409);
+    };
+    check();
+    const owned = { cancel: async () => {
+      this.cancelled.add(run.id);
+      controller.abort();
+      await stop?.();
+    } };
+    this.active.set(run.id, owned);
+    try { return await this.generateOwned(run, snapshot, update, controller.signal, check, (cancel) => { stop = cancel; }); }
+    catch (error) { check(); throw error; }
+    finally { if (this.active.get(run.id) === owned) this.active.delete(run.id); }
+  }
+  private async generateOwned(
+    run: Run,
+    snapshot: Snapshot,
+    update: (event: string, session?: string, turn?: string) => Promise<void>,
+    signal: AbortSignal,
+    check: () => void,
+    register: (cancel: () => Promise<void>) => void,
+  ): Promise<Proposal> {
     const runRoot = path.join(this.root, run.id);
     const root = path.join(runRoot, "project");
     // Cursor's Unix socket state needs a short base path (installed CLI limit: 83 chars).
@@ -355,8 +382,10 @@ export class LocalAI {
     await fs.mkdir(root, { recursive: true, mode: 0o700 });
     await fs.mkdir(runtime, { recursive: true, mode: 0o700 });
     await writeFiles(root, snapshot.files);
+    check();
     // Give CLI discovery an explicit isolated repository root, never the Studio host repository.
-    const initialized = await runCommand("git", ["init", "--quiet"], root);
+    const initialized = await runCommand("git", ["init", "--quiet"], root, { signal });
+    check();
     if (initialized.code)
       throw new StudioError(
         "Studio could not initialize the isolated proposal workspace.",
@@ -408,7 +437,9 @@ export class LocalAI {
         "agent",
         ["--disable-auto-update", "--version"],
         root,
+        { signal },
       );
+      check();
       const release = version.stdout.trim();
       if (/^[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[a-z0-9]+$/.test(release)) {
         const running = path.join(
@@ -423,6 +454,7 @@ export class LocalAI {
         toolState.push({ path: running, directory: true });
       }
     }
+    check();
     const rpc = new RPC(
       isCodex ? "codex" : "agent",
       args,
@@ -441,6 +473,7 @@ export class LocalAI {
       toolState,
       this.diagnostic,
     );
+    register(async () => rpc.close());
     rpc.onToolPid = (pid) => {
       void atomicJSON(path.join(runRoot, "runtime.json"), {
         runtime,
@@ -555,9 +588,7 @@ export class LocalAI {
         }
       }
     };
-    this.active.set(run.id, {
-      rpc,
-      cancel: async () => {
+    register(async () => {
         cancelled = true;
         setTimeout(() => rpc.close(), 1500).unref();
         fail(new StudioError("Cancelled. Partial output is quarantined."));
@@ -568,23 +599,28 @@ export class LocalAI {
               .catch(() => {});
           else rpc.notify("session/cancel", { sessionId: session });
         }
-      },
     });
+    const call = async (...args: Parameters<RPC["call"]>) => {
+      check();
+      const result = await rpc.call(...args);
+      check();
+      return result;
+    };
     try {
       if (isCodex) {
-        await rpc.call("initialize", {
+        await call("initialize", {
           clientInfo: { name: "design_prototype_studio", version: "0.1.0" },
         });
         rpc.notify("initialized");
         // Discover names only, then disable inherited servers before creating any thread.
-        const config = await rpc.call("config/read", { includeLayers: false });
+        const config = await call("config/read", { includeLayers: false });
         const mcp = Object.fromEntries(
           Object.keys(config.config?.mcp_servers ?? {}).map((name) => [
             name,
             { enabled: false },
           ]),
         );
-        const started = await rpc.call("thread/start", {
+        const started = await call("thread/start", {
           cwd: root,
           model: "gpt-6.1-sol",
           sandbox: "read-only",
@@ -594,7 +630,7 @@ export class LocalAI {
         });
         session = started.thread.id;
         await update("Preparing proposal", session);
-        const result = await rpc.call("turn/start", {
+        const result = await call("turn/start", {
           threadId: session,
           effort: "medium",
           input: [
@@ -605,7 +641,7 @@ export class LocalAI {
         await update("Generating", session, turn);
         await done;
       } else {
-        await rpc.call("initialize", {
+        await call("initialize", {
           protocolVersion: 1,
           clientCapabilities: {
             fs: { readTextFile: false, writeTextFile: false },
@@ -613,7 +649,7 @@ export class LocalAI {
           },
           clientInfo: { name: "design-prototype-studio", version: "0.1.0" },
         });
-        const started = await rpc.call("session/new", {
+        const started = await call("session/new", {
           cwd: root,
           mcpServers: [],
         });
@@ -623,12 +659,12 @@ export class LocalAI {
             (m: { id: string }) => m.id === "ask",
           )
         )
-          await rpc.call("session/set_mode", {
+          await call("session/set_mode", {
             sessionId: session,
             modeId: "ask",
           });
         await update("Generating", session);
-        const result = await rpc.call("session/prompt", {
+        const result = await call("session/prompt", {
           sessionId: session,
           prompt: [
             { type: "text", text: this.formatPrompt(snapshot, run.prompt) },
@@ -662,7 +698,7 @@ export class LocalAI {
       clearTimeout(timer);
       clearTimeout(progressTimer);
       await flushProgress().catch(() => {});
-      this.active.delete(run.id);
+
       rpc.protocol.completed = Date.now();
       await atomicJSON(
         path.join(runRoot, `protocol-${rpc.protocol.invocation}.json`),
@@ -675,11 +711,13 @@ export class LocalAI {
     }
   }
   async cancel(id: string) {
+    this.cancelled.add(id);
     const active = this.active.get(id);
     if (active) await active.cancel();
   }
   close() {
-    for (const a of this.active.values()) a.rpc.close();
+    this.closed = true;
+    for (const a of this.active.values()) void a.cancel();
     this.active.clear();
   }
 }

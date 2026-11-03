@@ -2,6 +2,7 @@ import { chromium, expect } from "@playwright/test";
 import type { Snapshot } from "./contracts.js";
 import { parseRequirements } from "./requirements.js";
 import { Previews } from "./preview.js";
+import { orderedScenarioSteps } from "../templates/scenario-order.js";
 export type QualityResult = {
   scenario: string;
   name: string;
@@ -112,9 +113,9 @@ export async function checkQuality(
         );
       if (!snapshot.files[binding.fixture])
         result.failures.push("Scenario fixture is missing.");
-      for (const step of scenario.steps)
-        if (!binding.steps.some((s) => s.step === step.id))
-          result.failures.push(`Untested requirement: ${step.text}`);
+      let steps = binding.steps;
+      try { steps = orderedScenarioSteps(scenario.steps.map((step) => step.id), binding.steps); }
+      catch (error) { result.failures.push(error instanceof Error ? error.message : String(error)); }
       if (result.failures.length) continue;
       const page = await browser.newPage({
         viewport: { width: 1440, height: 1000 },
@@ -138,7 +139,7 @@ export async function checkQuality(
           `${storybook.url}/iframe.html?id=${encodeURIComponent(story.id)}&viewMode=story`,
         );
         await page.locator("#storybook-root > *").first().waitFor();
-        for (const step of binding.steps) {
+        for (const step of steps) {
           const target = page.getByRole(
             step.role as Parameters<typeof page.getByRole>[0],
             { name: step.name, exact: true },

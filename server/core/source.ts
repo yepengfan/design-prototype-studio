@@ -35,7 +35,7 @@ const jsx = (node: Node): node is Element =>
 function parse(source: string) {
   const project = new Project({
     useInMemoryFileSystem: true,
-    compilerOptions: { jsx: 4 },
+    compilerOptions: { jsx: 4, noLib: true },
   });
   return project.createSourceFile("page.tsx", source);
 }
@@ -249,7 +249,7 @@ export type Edit = {
 };
 type SourceContext = { files?: Files; file?: string; provider?: string };
 function sourceProject(files: Files) {
-  const project = new Project({ useInMemoryFileSystem: true, compilerOptions: { jsx: 4, moduleResolution: 100, allowJs: true } });
+  const project = new Project({ useInMemoryFileSystem: true, compilerOptions: { jsx: 4, moduleResolution: 100, allowJs: true, noLib: true } });
   for (const [name, source] of Object.entries(files))
     if (/\.[cm]?[jt]sx?$/.test(name)) project.createSourceFile("/" + name, source);
   return project;
@@ -1035,6 +1035,38 @@ function lexicalIdentity(node: Node) {
       return syntax(parent).split("=>")[0];
     });
 }
+// Preserve a legacy control only while its statically visible execution context
+// remains unchanged. Changed or ambiguous runtime context requires a library-backed
+// implementation; this deliberately does not evaluate arbitrary JavaScript.
+function controlExecutionContext(node: Node) {
+  const file = node.getSourceFile();
+  const factories = new Set(file.getDescendants().filter(Node.isCallExpression).filter((call) => {
+    const target = reference(call.getExpression());
+    return target?.module === "react" && ["createElement", "default.createElement"].includes(target.exported);
+  }).map((call) => call.getStart()));
+  const runtimeSyntax = (input: Node) => {
+    const transformed = ts.transform(input.compilerNode, [(context) => {
+      const visit: ts.Visitor = (value) => {
+        if (ts.isJsxElement(value) || ts.isJsxSelfClosingElement(value) || ts.isJsxFragment(value) ||
+            (ts.isCallExpression(value) && factories.has(value.getStart(file.compilerNode))))
+          return ts.factory.createNull();
+        return ts.visitEachChild(value, visit, context);
+      };
+      return (root) => ts.visitNode(root, visit) as typeof root;
+    }]);
+    try { return ts.createPrinter({removeComments:true}).printNode(ts.EmitHint.Unspecified, transformed.transformed[0], file.compilerNode); }
+    finally { transformed.dispose(); }
+  };
+  const functions = node.getAncestors().filter((parent) => Node.isFunctionDeclaration(parent) || Node.isArrowFunction(parent) || Node.isFunctionExpression(parent) || Node.isMethodDeclaration(parent));
+  const guards = node.getAncestors().flatMap((parent) => {
+    if (Node.isConditionalExpression(parent)) return [syntax(parent.getCondition()), node.getStart() < parent.getWhenFalse().getStart() ? "true-branch" : "false-branch"];
+    if (Node.isBinaryExpression(parent) && [SyntaxKind.AmpersandAmpersandToken, SyntaxKind.BarBarToken, SyntaxKind.QuestionQuestionToken].includes(parent.getOperatorToken().getKind()))
+      return [syntax(parent.getLeft()), parent.getOperatorToken().getText()];
+    if (Node.isIfStatement(parent)) return [syntax(parent.getExpression()), node.getStart() < (parent.getElseStatement()?.getStart() ?? Infinity) ? "then" : "else"];
+    return [];
+  });
+  return [guards, functions.map(runtimeSyntax), file.getVariableStatements().map(runtimeSyntax)];
+}
 export function validateCapabilities(files: Files, manifest: Manifest, previous: Files = files) {
   const project = sourceProject(files);
   const baseline = previous === files ? project : sourceProject(previous);
@@ -1055,7 +1087,7 @@ export function validateCapabilities(files: Files, manifest: Manifest, previous:
   const controls = new Map<string, number>();
   const nativeControl = (file: SourceFile, expression: Node, tag: string, properties: ControlProperty[], collecting: boolean) => {
     if (!replacementControl(tag, properties)) return;
-    const key = JSON.stringify([file.getFilePath(), lexicalIdentity(expression), tag,
+    const key = JSON.stringify([file.getFilePath(), lexicalIdentity(expression), controlExecutionContext(expression), tag,
       properties.filter((property) => !["style", "className"].includes(property.name ?? "")).map((property) => [property.name, property.value === undefined ? property.expression : property.value])]);
     const remaining = controls.get(key) ?? 0;
     if (!collecting && !remaining)

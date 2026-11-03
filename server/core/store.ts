@@ -11,6 +11,7 @@ import {
   type Snapshot,
 } from "./contracts.js";
 import { parseRequirements } from "./requirements.js";
+import { validateCapabilities } from "./source.js";
 
 export class ProjectStore {
   private queues = new Map<string, Promise<unknown>>();
@@ -98,6 +99,8 @@ export class ProjectStore {
   }
   async persist(id: string, input: Omit<Snapshot, "id" | "at">) {
     validateFiles(input.files);
+    const accepted = input.parent ? await this.snapshot(id, input.parent) : undefined;
+    validateCapabilities(input.files, input.manifest, accepted?.files ?? input.files);
     manifestSchema.parse(input.manifest);
     for (const p of input.manifest.pages)
       if (!(p.file in input.files))

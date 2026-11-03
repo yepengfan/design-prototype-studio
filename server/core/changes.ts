@@ -29,7 +29,7 @@ export const differences = (before: Files, after: Files) =>
 // Compare syntax and literal values, not source spelling. Comments, quote choice and
 // indentation carry no business meaning; whitespace inside strings still does.
 function withoutPresentation(source: string, components: Component[]) {
-  const p = new Project({ useInMemoryFileSystem: true });
+  const p = new Project({ useInMemoryFileSystem: true, compilerOptions: { noLib: true } });
   const f = p.createSourceFile("page.tsx", source);
   const literal = (node: ts.Node): boolean => {
     if (
@@ -160,7 +160,7 @@ function isExecutionConfiguration(file: string) {
 function executionClosure(files: Files) {
   const frozen = new Set(Object.keys(files).filter(isExecutionConfiguration));
   const pending = [...frozen];
-  const p = new Project({ useInMemoryFileSystem: true });
+  const p = new Project({ useInMemoryFileSystem: true, compilerOptions: { noLib: true } });
   while (pending.length) {
     const name = pending.pop()!;
     if (!/\.[cm]?[jt]sx?$/.test(name)) continue;

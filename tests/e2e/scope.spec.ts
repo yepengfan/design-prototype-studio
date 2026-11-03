@@ -153,11 +153,14 @@ test("a new selected scope can generate its current page while preserving indepe
       confirm: true,
     });
     const id = imported.state.id;
-    await request(`/projects/${id}/requirements`, {
-      base: imported.snapshot.id,
-      files: {},
-      scope: ["requirements/second.feature"],
-    });
+    await page.goto(origin);
+    await page.getByLabel("Current project").selectOption(id);
+    await page.locator(".scope-button").click();
+    await expect(page.getByLabel("Include requirements/notices.feature")).toBeChecked();
+    await expect(page.getByLabel("Include requirements/second.feature")).toBeChecked();
+    await page.getByLabel("Include requirements/notices.feature").uncheck();
+    await page.getByRole("button", {name:"Use selected requirements"}).click();
+    await expect.poll(async () => (await request(`/projects/${id}`)).scope.files.map((file: {file:string}) => file.file)).toEqual(["requirements/second.feature"]);
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(origin);

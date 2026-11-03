@@ -50,6 +50,7 @@ export default ts.config(js.configs.recommended, ...ts.configs.recommended, {
   rules: { "@typescript-eslint/no-explicit-any": "off", "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }] }
 });
 `,
+    "tests/scenario-order.ts": readFileSync(new URL("../templates/scenario-order.ts", import.meta.url), "utf8"),
     "tests/scenarios.spec.ts": readFileSync(
       new URL("../templates/scenarios.spec.ts", import.meta.url),
       "utf8",

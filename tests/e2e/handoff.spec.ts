@@ -8,7 +8,8 @@ import { createApp } from "../../server/app";
 import { registryFixture } from "../registry";
 import { prototypeFixture } from "../prototype";
 import { exportArchive, readArchive } from "../../server/core/archive";
-import { digest } from "../../server/core/files";
+import { digest, writeFiles } from "../../server/core/files";
+import { parseRequirements } from "../../server/core/requirements";
 import { installProject } from "../../server/core/libraries";
 import { runCommand } from "../../server/core/process";
 test("fresh source handoff preserves controllers, providers, styles and all scenario outcomes across import/edit/export", async ({
@@ -166,6 +167,26 @@ test("fresh source handoff preserves controllers, providers, styles and all scen
     expect(again.snapshot.files["src/pages/Page.tsx"]).toBe(
       exported["src/pages/Page.tsx"],
     );
+    // Deliberately wrong behavior must not pass by putting Then before When.
+    const wrong = structuredClone(prototype);
+    wrong.files["requirements/notices.feature"] = "Feature: Keep a name\nScenario: Name remains Alex\nGiven the notice workspace is open\nWhen I enter Jordan\nThen the name is Alex\n";
+    wrong.files["src/pages/Page.tsx"] = wrong.files["src/pages/Page.tsx"].replace("const[name,setName]=useState('')", "const[name,setName]=useState('Alex')");
+    const requirement = parseRequirements(wrong.files, wrong.manifest.scope).scenarios[0];
+    wrong.manifest.scenarios = [{scenario:requirement.id,page:"page",story:"src/Notice.stories.tsx#Success",fixture:"src/data/notices.ts",accepted:true,steps:[
+      {step:"1",action:"visible",role:"heading",name:"Notice workspace"},
+      {step:"3",action:"value",role:"textbox",name:"Your name",value:"Alex"},
+      {step:"2",action:"fill",role:"textbox",name:"Your name",value:"Jordan"},
+    ]}];
+    const wrongProject = await studio.store.create(wrong.manifest, wrong.files);
+    const failed = await request(`/projects/${wrongProject.state.id}/quality`, {});
+    expect(failed.ready).toBe(false);
+    expect(failed.results.flatMap((result: {failures:string[]}) => result.failures).join("\n")).toContain("Jordan");
+    const wrongExport = readArchive(exportArchive(wrong.files, wrong.manifest));
+    await writeFiles(fresh, wrongExport);
+    const failedExport = await runCommand("npm", ["run", "test:scenarios"], fresh, {env:{STUDIO_STORYBOOK_PORT:String(scenarioAddress.port),STUDIO_CHROME:process.env.STUDIO_CHROME,CI:"1"},timeout:120000});
+    expect(failedExport.code).not.toBe(0);
+    expect(failedExport.stdout + failedExport.stderr).toContain("Jordan");
+    expect(failedExport.stdout).toContain("1 failed");
   } finally {
     await studio.close();
     server.closeAllConnections();

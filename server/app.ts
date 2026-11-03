@@ -31,6 +31,7 @@ import {
 import { Annotations } from "./core/annotations.js";
 import { templateInput } from "./core/templates.js";
 import { checkQuality } from "./core/quality.js";
+import { orderedScenarioSteps } from "./templates/scenario-order.js";
 
 export async function createApp(options: {
   root: string;
@@ -1039,14 +1040,8 @@ export async function createApp(options: {
           throw new StudioError(
             "This scenario needs an implementation and test plan before review.",
           );
-        if (
-          scenario.steps.some(
-            (step) => !binding.steps.some((test) => test.step === step.id),
-          )
-        )
-          throw new StudioError(
-            "Every requirement step needs an explicit check before approving this test plan.",
-          );
+        try { binding.steps = orderedScenarioSteps(scenario.steps.map((step) => step.id), binding.steps); }
+        catch (error) { throw new StudioError(error instanceof Error ? error.message : String(error), 422); }
         binding.accepted = req.body.accept === true;
         return store.commit(
           req.params.id,

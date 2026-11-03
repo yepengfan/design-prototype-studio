@@ -16,10 +16,20 @@ import {
 } from "./files.js";
 import { parseRequirements } from "./requirements.js";
 import { synchronizeRuntime } from "./project.js";
+import { orderedScenarioSteps } from "../templates/scenario-order.js";
 
 export function exportArchive(files: Files, manifest: Manifest) {
   const zip = new AdmZip();
-  const content = synchronizeRuntime(files, manifest);
+  const exported = structuredClone(manifest);
+  const requirements = parseRequirements(files, Object.keys(files).filter((name) => name.endsWith(".feature")));
+  for (const binding of exported.scenarios) {
+    const scenario = requirements.scenarios.find((item) => item.id === binding.scenario);
+    if (!scenario) throw new StudioError("A scenario mapping has no matching Gherkin requirement.", 422);
+    binding.steps = orderedScenarioSteps(scenario.steps.map((step) => step.id), binding.steps);
+  }
+  // Historical source runners read manifest-array order. Canonicalizing the
+  // handoff fixes that contract without replacing an imported test implementation.
+  const content = synchronizeRuntime(files, exported);
   validateFiles(content);
   for (const [file, value] of Object.entries(content))
     zip.addFile(safeRelative(file), decodeFile(file, value));

@@ -4,6 +4,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { generateMessages } from "@cucumber/gherkin";
 import { IdGenerator, SourceMediaType } from "@cucumber/messages";
+import { orderedScenarioSteps } from "./scenario-order";
 const root = path.resolve(import.meta.dirname, "..");
 type Step = {
   step: string;
@@ -95,6 +96,7 @@ for (const scenario of scenarios)
         binding!.steps.some((test) => test.step === step),
         "Untested requirement step " + step,
       ).toBe(true);
+    const checks = orderedScenarioSteps(scenario.steps, binding!.steps);
     await fs.access(path.join(root, binding!.fixture));
     const response = await request.get("/index.json");
     expect(response.ok()).toBe(true);
@@ -120,7 +122,7 @@ for (const scenario of scenarios)
       "/iframe.html?id=" + encodeURIComponent(story!.id) + "&viewMode=story",
     );
     await page.locator("#storybook-root > *").first().waitFor();
-    for (const step of binding!.steps) {
+    for (const step of checks) {
       const target = page.getByRole(
         step.role as Parameters<typeof page.getByRole>[0],
         { name: step.name, exact: true },

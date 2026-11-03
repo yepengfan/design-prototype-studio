@@ -1976,9 +1976,10 @@ function Requirements({
       ).filter(([f]) => f.endsWith(".feature")),
     ),
   );
-  const [chosen, setChosen] = useState(
-    data.state.templateReconciliation?.scope ?? data.snapshot.manifest.scope,
-  );
+  const [chosen, setChosen] = useState(() => {
+    const selected = data.state.templateReconciliation?.scope ?? data.snapshot.manifest.scope;
+    return Object.keys(files).filter((file) => selected.some((scope) => file === scope || file.startsWith(scope.replace(/\/$/, "") + "/")));
+  });
   const [active, setActive] = useState(
     Object.keys(files)[0] ?? "requirements/page.feature",
   );
