@@ -1599,7 +1599,7 @@ function ProjectStudio({ id, setId }: { id: string; setId: (id: string) => void 
                 />
               )}
               {modal === "quality" && data && (
-                <Quality project={id} data={data} run={act} adapter={adapter} />
+                <Quality key={id + ":" + data.snapshot.id} project={id} data={data} run={act} adapter={adapter} />
               )}
               {modal === "templates" && (
                 <Templates
@@ -2422,7 +2422,8 @@ function Quality({
   data: Data;
   run: (s: string, f: () => Promise<unknown>) => Promise<void>;
 }) {
-  const [report, setReport] = useState<any>();
+  const [result, setReport] = useState<any>();
+  const report = result?.revision === data.snapshot.id ? result : undefined;
   const [stories, setStories] = useState<{ story: string; name: string }[]>();
   return (
     <>

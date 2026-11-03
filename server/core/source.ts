@@ -1031,6 +1031,23 @@ function sourceClosure(project: Project, files: Files, manifest: Manifest) {
   }
   return accepted;
 }
+export function referencedComponentPackages(files: Files, manifest: Manifest) {
+  const packages = new Set<string>();
+  for (const file of sourceClosure(sourceProject(files), files, manifest)) {
+    for (const node of file.getDescendants()) {
+      let target: Node | undefined;
+      if (Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) target = node.getTagNameNode();
+      else if (Node.isCallExpression(node)) {
+        const factory = reference(node.getExpression());
+        if (factory?.module === "react" && ["createElement", "default.createElement"].includes(factory.exported)) target = node.getArguments()[0];
+      }
+      const origin = target && reference(target);
+      if (!origin?.module || ["react", "react-dom"].some((module) => origin.module === module || origin.module.startsWith(module + "/"))) continue;
+      packages.add(origin.module.startsWith("@") ? origin.module.split("/").slice(0, 2).join("/") : origin.module.split("/")[0]);
+    }
+  }
+  return [...packages];
+}
 export function localSourceClosure(files: Files, roots: string[]) {
   const project = sourceProject(files);
   const accepted = new Set<string>();

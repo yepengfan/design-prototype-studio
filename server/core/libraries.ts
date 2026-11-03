@@ -13,50 +13,7 @@ import {
 import { safeRelative, writeFiles } from "./files.js";
 import { npmFailure, registryURL, runCommand } from "./process.js";
 
-/** External JSX building blocks need the same published contract on legacy import. */
-export function referencedComponentPackages(files: Files) {
-  const packages = new Set<string>();
-  const project = new Project({ useInMemoryFileSystem: true });
-  for (const [name, content] of Object.entries(files)) {
-    if (!/\.[tj]sx$/.test(name)) continue;
-    const source = project.createSourceFile(name, content);
-    const tags = new Set(
-      source
-        .getDescendants()
-        .filter(
-          (node) =>
-            Node.isJsxOpeningElement(node) ||
-            Node.isJsxSelfClosingElement(node),
-        )
-        .map((node) => node.getTagNameNode().getText().split(".")[0]),
-    );
-    for (const declaration of source.getImportDeclarations()) {
-      const specifier = declaration.getModuleSpecifierValue();
-      if (
-        specifier.startsWith(".") ||
-        specifier === "react" ||
-        specifier.startsWith("react/")
-      )
-        continue;
-      const locals = [
-        declaration.getDefaultImport()?.getText(),
-        declaration.getNamespaceImport()?.getText(),
-        ...declaration
-          .getNamedImports()
-          .map(
-            (binding) => binding.getAliasNode()?.getText() ?? binding.getName(),
-          ),
-      ];
-      if (locals.some((local) => local && tags.has(local)))
-        packages.add(
-          specifier.startsWith("@")
-            ? specifier.split("/").slice(0, 2).join("/")
-            : specifier.split("/")[0],
-        );
-    }
-  }
-  return [...packages];
-}
+export { referencedComponentPackages } from "./source.js";
 export function packageIdentity(name: string, version: string) {
   if (
     !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name) ||

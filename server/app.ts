@@ -1228,7 +1228,7 @@ export async function createApp(options: {
       const installed = await previews.materialize(candidate);
       const dependencies =
         JSON.parse(inspected.files["package.json"]).dependencies ?? {};
-      for (const name of referencedComponentPackages(inspected.files)) {
+      for (const name of referencedComponentPackages(inspected.files, inspected.manifest)) {
         const version = dependencies[name];
         if (typeof version !== "string")
           throw new StudioError(
