@@ -274,7 +274,7 @@ export function prepareChange(
         JSON.stringify({ ...base.manifest, scenarios: [] }) !==
         JSON.stringify({ ...manifest, scenarios: [] })
       );
-    if (/\.tsx?$/.test(d.file) && d.before && d.after)
+    if (/\.[cm]?[jt]sx?$/.test(d.file) && d.before && d.after)
       return (
         withoutPresentation(
           d.before,
@@ -383,7 +383,7 @@ export function prepareChange(
     ...manifest.libraries.map((l) => l.name),
   ]);
   for (const [file, source] of Object.entries(files))
-    if (file.startsWith("src/") && /\.tsx?$/.test(file)) {
+    if (file.startsWith("src/") && /\.[cm]?[jt]sx?$/.test(file)) {
       const p = new Project({ useInMemoryFileSystem: true });
       const f = p.createSourceFile(file, source);
       for (const imp of f.getImportDeclarations()) {
@@ -397,73 +397,8 @@ export function prepareChange(
             `The proposal uses an unadmitted package: ${spec}. Import and inspect that library first.`,
           );
       }
-      for (const n of f
-        .getDescendants()
-        .filter(
-          (n) => Node.isJsxElement(n) || Node.isJsxSelfClosingElement(n),
-        )) {
-        const tag = (Node.isJsxElement(n) ? n.getOpeningElement() : n)
-          .getTagNameNode()
-          .getText();
-        const opening = Node.isJsxElement(n) ? n.getOpeningElement() : n;
-        const native = /^[a-z]/.test(tag);
-        const interactiveRoles = new Set([
-          "button",
-          "checkbox",
-          "combobox",
-          "link",
-          "listbox",
-          "menuitem",
-          "option",
-          "radio",
-          "scrollbar",
-          "searchbox",
-          "slider",
-          "spinbutton",
-          "switch",
-          "tab",
-          "textbox",
-          "treeitem",
-        ]);
-        const replacement =
-          native &&
-          ([
-            "button",
-            "input",
-            "select",
-            "textarea",
-            "dialog",
-            "a",
-            "summary",
-            "details",
-          ].includes(tag) ||
-            opening.getAttributes().some((attribute) => {
-              if (Node.isJsxSpreadAttribute(attribute)) return true;
-              if (!Node.isJsxAttribute(attribute)) return false;
-              const name = attribute.getNameNode().getText();
-              if (name === "role") {
-                const initializer = attribute.getInitializer();
-                const role =
-                  initializer && Node.isStringLiteral(initializer)
-                    ? initializer.getLiteralValue()
-                    : undefined;
-                return role === undefined || interactiveRoles.has(role);
-              }
-              // A semantic form owns validation/submission; its controls still
-              // have to come from the admitted library.
-              if (tag === "form" && name === "onSubmit") return false;
-              return (
-                /^on[A-Z]/.test(name) ||
-                ["tabIndex", "contentEditable", "controls"].includes(name)
-              );
-            }));
-        if (replacement && !base.files[file]?.includes(n.getText()))
-          throw new StudioError(
-            `The proposal invents a ${tag} control. Studio must use the admitted library capability.`,
-          );
-      }
     }
-  validateCapabilities(files, manifest);
+  validateCapabilities(files, manifest, base.files);
   const finalFiles = synchronizeRuntime(files, manifest);
   return {
     id: randomUUID(),

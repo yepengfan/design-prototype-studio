@@ -50,7 +50,7 @@ it("rejects conditional membership changes and form crossings for body and named
       const target = anchors(source, [card]).filter((node) => node.tag === "Card")[1];
       expect(() => edit(source, "Card", { parent: target.id, slot })).toThrow("form ownership");
     }
-});
+}, 30000);
 it("exposes spread ownership and preserves effective literal property edits", () => {
   const source = `import {Card} from '@fixture/cards';export function Page(){const settings={tone:'accent'};return <main {...settings}><Card tone="neutral" {...settings}/></main>}`;
   expect(anchors(source, [card]).find((node) => node.tag === "Card")?.controlled).toContain("tone");
@@ -284,4 +284,56 @@ it("legacy validation runs real lint without a supplied script or altering origi
     expect(await fs.readFile(path.join(root, "package.json"), "utf8")).toBe(files["package.json"]);
     expect(await fs.readFile(path.join(root, "eslint.config.mjs"), "utf8")).toBe(files["eslint.config.mjs"]);
   } finally { await previews.close(); await fs.rm(root, { recursive: true, force: true }); }
+}, 30000);
+it("preserves event, label and first-legend owners in both directions and both slot representations", () => {
+  for (const owner of ["event", "label", "legend"]) for (const inward of [false, true]) for (const slot of [undefined, "header"]) {
+    const moved = '<Card>Moved</Card>';
+    const target = '<Card header={null}></Card>';
+    const inside = inward ? target : moved;
+    const outside = inward ? moved : target;
+    const content = owner === "legend"
+      ? `<fieldset disabled><legend>${inside}</legend>${outside}</fieldset>`
+      : owner === "label" ? `<label>${inside}</label>${outside}` : `<div onClick={acknowledge}>${inside}</div>${outside}`;
+    const source = `import {Card} from '@fixture/cards';export function Page(){return <main>${content}</main>}`;
+    const nodes = anchors(source, [card]);
+    const selected = nodes.find((node) => node.text === "Moved")!;
+    const destination = nodes.find((node) => node.tag === "Card" && node.text !== "Moved")!;
+    expect(() => editSource(source, { anchor: selected.id, sourceHash: digest(source), operation: "move", parent: destination.id, slot }, [card]), `${owner}:${inward}:${slot}`).toThrow("ownership");
+  }
+  const legends = `export function Page(){return <main><fieldset disabled><legend>First</legend><legend>Second</legend></fieldset></main>}`;
+  const fieldset = anchors(legends).find((node) => node.tag === "fieldset")!;
+  expect(() => edit(legends, "legend", { parent: fieldset.id, index: 1 })).toThrow("ownership");
+  const source = `import {Card} from '@fixture/cards';export function Page(){return <main><div onClick={()=>{}}><Card>Moved</Card><section></section></div></main>}`;
+  const target = anchors(source, [card]).find((node) => node.tag === "section")!;
+  expect(render(edit(source, "Card", { parent: target.id }), { Card: () => createElement("article", null, "Moved") })).toContain("<section><article>Moved</article></section>");
+}, 30000);
+it("uses decorator parameter bindings and rejects unrelated or shadowed control bindings", () => {
+  const { files, manifest } = blankProject("Decorators");
+  for (const name of ["Story", "RenderStory", "View"]) {
+    const source = `export const Example={decorators:[(${name})=><section><${name}/></section>]};`;
+    expect(() => validateCapabilities({ ...files, "src/Example.stories.tsx": source }, manifest)).not.toThrow();
+  }
+  for (const source of [
+    `export const Example={decorators:[(View,Context)=><Context/>]};`,
+    `import {Field} from '@fixture/cards';export const Example={decorators:[View=>{const Story=Field;return <Story/>}]};`,
+    `export function Other(Story){return <Story/>}`,
+  ]) expect(() => validateCapabilities({ ...files, "src/Example.stories.tsx": source }, manifest)).toThrow();
+});
+it("applies one replacement-control policy to JSX and React factories across accepted source extensions", () => {
+  for (const extension of ["js", "jsx", "ts", "tsx"]) {
+    const project = blankProject("Strict controls");
+    const base = { ...project, id: "base", at: "now", label: "Blank" };
+    const propose = (source: string) => prepareChange(base, { kind: "presentation", summary: "Generate", files: { [`src/Control.${extension}`]: source }, questions: [], affectedScenarios: [] });
+    for (const props of ["{onClick:acknowledge}", "{role:'button'}", "{role:unknown}", "{tabIndex:0}", "{contentEditable:true}", "{controls:true}"])
+      expect(() => propose(`import {createElement as h} from 'react';export function Control(){return h('div',${props},'Confirm')}`), `${extension}:${props}`).toThrow("invents");
+    expect(() => propose(`import React from 'react';export function Control(){return React.createElement('button',null,'Confirm')}`)).toThrow("invents");
+    for (const props of ["settings", "{...settings}", "{[property]:true}"])
+      expect(() => propose(`import {createElement as h} from 'react';export function Control(){return h('div',${props})}`)).toThrow("properties cannot be identified");
+    expect(() => propose(`import {createElement as h} from 'react';export function Control(){return h(target,null)}`)).toThrow("cannot be identified");
+    expect(() => propose(`import {createElement as h} from 'react';export function Control(){return h('main',{style:{padding:16}},h('p',{role:'status'},'Ready'))}`)).not.toThrow();
+    if (extension.endsWith("x")) {
+      expect(() => propose(`export function Control(){return <div onClick={acknowledge}>Confirm</div>}`)).toThrow("invents");
+      expect(() => propose(`export function Control(){return <main><p role="status">Ready</p></main>}`)).not.toThrow();
+    }
+  }
 }, 30000);

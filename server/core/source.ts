@@ -277,12 +277,12 @@ export function editSource(
     throw new StudioError(
       "This item repeats or depends on a condition. Use a prompt to preserve the matching scenario behavior.",
     );
+  const behaviorAttributes = (element: Element) => opening(element).getAttributes().some((attribute) =>
+    Node.isJsxSpreadAttribute(attribute) || (Node.isJsxAttribute(attribute) &&
+      (/^on[A-Z]/.test(attribute.getNameNode().getText()) ||
+        ["role", "aria-live", "hidden", "inert", "disabled", "ref", "form", "required", "name"].includes(attribute.getNameNode().getText()))));
   const behaviorBearing = (element: Element) =>
-    ["form", "fieldset"].includes(opening(element).getTagNameNode().getText()) ||
-    opening(element).getAttributes().some((attribute) =>
-      Node.isJsxSpreadAttribute(attribute) || (Node.isJsxAttribute(attribute) &&
-        (/^on[A-Z]/.test(attribute.getNameNode().getText()) ||
-          ["role", "aria-live", "hidden", "disabled", "ref", "form", "required", "name"].includes(attribute.getNameNode().getText())))) ||
+    ["form", "fieldset", "label"].includes(opening(element).getTagNameNode().getText()) || behaviorAttributes(element) ||
     element.getDescendants().some((child) => Node.isJsxExpression(child) &&
       !!child.getExpression() && literalValue(child.getExpression()) === undefined);
   const business =
@@ -600,7 +600,7 @@ export function editSource(
       node.getDescendants().includes(parent)
     )
       throw new StudioError("Choose a different supported parent container.");
-    const protectedTags = new Set(["form", "fieldset"]);
+    const protectedTags = new Set(["form", "fieldset", "label"]);
     for (const component of components) {
       for (const setup of [component.provider, ...(component.setup ?? [])]) {
       if (!setup) continue;
@@ -614,11 +614,20 @@ export function editSource(
       }
       }
     }
-    const protectedNode = (element: Node) => jsx(element) && protectedTags.has(opening(element).getTagNameNode().getText());
+    const firstLegend = (element: Element) => {
+      if (opening(element).getTagNameNode().getText() !== "legend") return false;
+      const fieldset = element.getAncestors().find(jsx);
+      return !!fieldset && opening(fieldset).getTagNameNode().getText() === "fieldset" &&
+        all.find((candidate) => opening(candidate).getTagNameNode().getText() === "legend" && candidate.getAncestors().find(jsx) === fieldset) === element;
+    };
+    const protectedNode = (element: Node) => jsx(element) &&
+      (protectedTags.has(opening(element).getTagNameNode().getText()) || behaviorAttributes(element) || firstLegend(element));
     const owners = (element: Element) => element.getAncestors().filter(protectedNode);
     const beforeOwners = owners(node);
     const afterOwners = [...(protectedNode(parent) ? [parent] : []), ...owners(parent)];
-    if (target?.dynamic || beforeOwners.length !== afterOwners.length || beforeOwners.some((owner, index) => owner !== afterOwners[index]))
+    const movingLegend = opening(node).getTagNameNode().getText() === "legend" &&
+      [node.getAncestors().find(jsx), parent].some((element) => element && opening(element).getTagNameNode().getText() === "fieldset");
+    if (movingLegend || target?.dynamic || beforeOwners.length !== afterOwners.length || beforeOwners.some((owner, index) => owner !== afterOwners[index]))
       throw new StudioError("This move changes conditional, provider or form ownership. Use a prompt to review the matching requirements.", 422);
     if (edit.slot) {
       if (!target?.component?.slots.includes(edit.slot))
@@ -835,8 +844,19 @@ function removalPatch(node: Element) {
   };
 }
 
-export function validateCapabilities(files: Files, manifest: Manifest) {
-  const project = new Project({ useInMemoryFileSystem: true, compilerOptions: { jsx: 4, moduleResolution: 100 } });
+function replacementControl(tag: string, properties: { name?: string; value?: unknown }[]) {
+  const roles = new Set(["button", "checkbox", "combobox", "link", "listbox", "menuitem", "option", "radio", "scrollbar", "searchbox", "slider", "spinbutton", "switch", "tab", "textbox", "treeitem"]);
+  return ["button", "input", "select", "textarea", "dialog", "a", "summary", "details"].includes(tag) ||
+    properties.some(({ name, value }) => {
+      if (!name) return true;
+      if (name === "role") return typeof value !== "string" || roles.has(value);
+      if (tag === "form" && name === "onSubmit") return false;
+      return /^on[A-Z]/.test(name) || ["tabIndex", "contentEditable", "controls"].includes(name);
+    });
+}
+
+export function validateCapabilities(files: Files, manifest: Manifest, previous: Files = files) {
+  const project = new Project({ useInMemoryFileSystem: true, compilerOptions: { jsx: 4, moduleResolution: 100, allowJs: true } });
   for (const [name, source] of Object.entries(files))
     if (/\.[cm]?[jt]sx?$/.test(name)) project.createSourceFile("/" + name, source);
   type Reference = { module: string; exported: string };
@@ -880,8 +900,16 @@ export function validateCapabilities(files: Files, manifest: Manifest) {
         if (["memo", "forwardRef"].includes(name) && node.getArguments()[0]) return reference(node.getArguments()[0], seen);
       }
     }
-    if (Node.isParameterDeclaration(node) && node.getName() === "Story" && node.getAncestors().some((ancestor) => Node.isPropertyAssignment(ancestor) && ancestor.getName() === "decorators"))
-      return { module: "", exported: "" };
+    if (Node.isParameterDeclaration(node)) {
+      const decorator = node.getParent();
+      if ((Node.isArrowFunction(decorator) || Node.isFunctionExpression(decorator)) && decorator.getParameters()[0] === node) {
+        let container: Node = decorator.getParent();
+        while (Node.isParenthesizedExpression(container) || Node.isAsExpression(container) || Node.isSatisfiesExpression(container)) container = container.getParent();
+        const property = container.getParent();
+        if (Node.isArrayLiteralExpression(container) && Node.isPropertyAssignment(property) && property.getName() === "decorators")
+          return { module: "", exported: "" };
+      }
+    }
     if (Node.isVariableDeclaration(node)) {
       const initializer = node.getInitializer();
       return initializer && reference(initializer, seen);
@@ -929,13 +957,42 @@ export function validateCapabilities(files: Files, manifest: Manifest) {
     if (!allowed.has(origin.module + "#" + origin.exported))
       throw new StudioError(`Library capability ${origin.module}#${origin.exported} is not admitted. Ask the library maintainer for documented setup and examples in an updated release.`, 422);
   };
+  const nativeControl = (file: SourceFile, expression: Node, tag: string, properties: { name?: string; value?: unknown }[]) => {
+    if (replacementControl(tag, properties) && !previous[file.getFilePath().slice(1)]?.includes(expression.getText()))
+      throw new StudioError(`The proposal invents a ${tag} control. Studio must use the admitted library capability.`, 422);
+  };
   for (const file of project.getSourceFiles()) {
     if (!file.getFilePath().startsWith("/src/")) continue;
     for (const node of file.getDescendants()) {
-      if (Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) check(node.getTagNameNode(), true);
+      if (Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) {
+        const tag = node.getTagNameNode();
+        check(tag, true);
+        if (Node.isIdentifier(tag) && /^[a-z]/.test(tag.getText())) {
+          const expression = Node.isJsxOpeningElement(node) ? node.getParent() : node;
+          nativeControl(file, expression, tag.getText(), node.getAttributes().map((attribute) => {
+            if (!Node.isJsxAttribute(attribute)) return {};
+            const initializer = attribute.getInitializer();
+            return { name: attribute.getNameNode().getText(), value: initializer ? literalValue(Node.isJsxExpression(initializer) ? initializer.getExpression() : initializer) : true };
+          }));
+        }
+      }
       if (Node.isCallExpression(node)) {
         const callee = reference(node.getExpression());
-        if (callee?.module === "react" && ["createElement", "default.createElement"].includes(callee.exported) && node.getArguments()[0]) check(node.getArguments()[0]);
+        if (callee?.module !== "react" || !["createElement", "default.createElement"].includes(callee.exported)) continue;
+        const [target, props] = node.getArguments();
+        if (!target) throw new StudioError("The React factory target is missing.", 422);
+        check(target);
+        if (!Node.isStringLiteral(target)) continue;
+        const properties: { name?: string; value?: unknown }[] = [];
+        if (props && props.getKind() !== SyntaxKind.NullKeyword && !(Node.isIdentifier(props) && props.getText() === "undefined")) {
+          if (!Node.isObjectLiteralExpression(props)) throw new StudioError("React factory properties cannot be identified safely. Use explicit properties before acceptance.", 422);
+          for (const property of props.getProperties()) {
+            if ((!Node.isPropertyAssignment(property) && !Node.isShorthandPropertyAssignment(property) && !Node.isMethodDeclaration(property)) || Node.isComputedPropertyName(property.getNameNode()))
+              throw new StudioError("React factory properties cannot be identified safely. Use explicit properties before acceptance.", 422);
+            properties.push({ name: property.getName().replace(/^['"]|['"]$/g, ""), value: Node.isPropertyAssignment(property) ? literalValue(property.getInitializer()) : undefined });
+          }
+        }
+        nativeControl(file, node, target.getLiteralValue(), properties);
       }
     }
   }

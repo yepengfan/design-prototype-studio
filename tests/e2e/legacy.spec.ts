@@ -79,6 +79,11 @@ test("legacy CSF source keeps controllers, providers, decorators and styles thro
       path.join(root, "original"),
       registry.base,
     );
+    prototype.files["src/Notice.stories.tsx"] = prototype.files["src/Notice.stories.tsx"].replace("decorators:[Story=>", "decorators:[RenderStory=>").replace("<Story/>", "<RenderStory/>");
+    prototype.files["src/pages/Page.tsx"] = prototype.files["src/pages/Page.tsx"]
+      .replace('<Button type="submit"', '<span onClick={()=>setName(name.trim())}><Button type="submit"')
+      .replace('Acknowledge</Button>', 'Acknowledge</Button></span>')
+      .replace('</form>', '</form><fieldset disabled><legend><Input aria-label="Legend field"/></legend><section></section></fieldset>');
     const packageJson = JSON.parse(prototype.files["package.json"]);
     delete packageJson.scripts.lint;
     for (const name of ["eslint", "@eslint/js", "typescript-eslint"]) delete packageJson.devDependencies[name];
@@ -180,6 +185,19 @@ test("legacy CSF source keeps controllers, providers, decorators and styles thro
     }, true);
     expect(removal.error).toContain("required interaction");
     expect((await request(`/projects/${id}`)).snapshot.id).toBe(data.snapshot.id);
+    const nodes = data.outline[0].nodes;
+    const form = nodes.find((node: { tag: string }) => node.tag === "form");
+    const button = nodes.find((node: { tag: string }) => node.tag === "Button");
+    const labelledInput = nodes.find((node: { tag: string; props: Record<string, unknown> }) => node.tag === "Input" && node.props["aria-label"] === "Your name");
+    const legendInput = nodes.find((node: { tag: string; props: Record<string, unknown> }) => node.tag === "Input" && node.props["aria-label"] === "Legend field");
+    const fieldsetRegion = nodes.find((node: { tag: string }) => node.tag === "section");
+    for (const [anchor, parent] of [[button.id, form.id], [labelledInput.id, form.id], [legendInput.id, fieldsetRegion.id]]) {
+      const refused = await request(`/projects/${id}/edit`, {
+        base: data.snapshot.id, page: "page-1", edit: { anchor, parent, operation: "move", sourceHash: data.outline[0].hash },
+      }, true);
+      expect(refused.error).toContain("ownership");
+      expect((await request(`/projects/${id}`)).snapshot.id).toBe(data.snapshot.id);
+    }
     const main = data.outline[0].nodes.find(
       (node: { tag: string }) => node.tag === "main",
     );

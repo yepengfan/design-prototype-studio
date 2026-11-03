@@ -61,11 +61,11 @@ export async function publishedStories(root: string, packageName: string) {
       if (!decorators || !Node.isArrayLiteralExpression(decorators)) continue;
       for (const decorator of decorators.getElements()) {
         if (!Node.isArrowFunction(decorator) && !Node.isFunctionExpression(decorator)) continue;
-        const story = decorator.getParameters()[0]?.getName();
+        const story = decorator.getParameters()[0]?.getNameNode().getSymbol()?.compilerSymbol;
         if (!story) continue;
         for (const wrapper of decorator.getDescendants().filter(Node.isJsxElement)) {
           if (!wrapper.getDescendants().some((node) =>
-            (Node.isJsxSelfClosingElement(node) || Node.isJsxOpeningElement(node)) && node.getTagNameNode().getText() === story)) continue;
+            (Node.isJsxSelfClosingElement(node) || Node.isJsxOpeningElement(node)) && Node.isIdentifier(node.getTagNameNode()) && node.getTagNameNode().getSymbol()?.compilerSymbol === story)) continue;
           const tag = wrapper.getOpeningElement().getTagNameNode().getText();
           for (const declaration of source.getImportDeclarations()) {
             if (declaration.getModuleSpecifierValue() !== packageName) continue;
