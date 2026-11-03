@@ -630,7 +630,6 @@ function editSourceUnchecked(
     local += reference.suffix;
     const example = c.examples[0];
     const attributes = Object.entries(example.props)
-      .filter(([p]) => c.props[p])
       .map(([p, v]) => `${p}={${JSON.stringify(v)}}`)
       .join(" ");
     let text = c.children

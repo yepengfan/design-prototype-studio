@@ -53,7 +53,7 @@ it("retains reusable render-recipe providers and blocks unresolved render setup 
   const context = createContext(false);
   const library = {
     Provider: ({ children }: { children?: ReactNode }) => createElement(context.Provider, { value: true }, children),
-    Notice: ({ tone }: { tone?: string }) => { if (!useContext(context)) throw new Error("Render provider required"); return createElement("aside", null, tone ?? "Ready"); },
+    Notice: ({ tone, config }: { tone?: string; config?: { label: string } }) => { if (!useContext(context)) throw new Error("Render provider required"); return createElement("aside", null, config?.label ?? tone ?? "Ready"); },
     Panel: ({ children, header }: { children?: ReactNode; header?: ReactNode }) => createElement("main", null, header, children),
   };
   try {
@@ -77,6 +77,13 @@ it("retains reusable render-recipe providers and blocks unresolved render setup 
       const inserted = editSource(source, { anchor: anchors(source)[0].id, sourceHash: digest(source), operation: "insert", component: configured }, [configured]);
       expect(render(inserted, library)).toContain(expected);
     }
+    await write("index.d.ts", `export interface NoticeProps {\n/** Surface tone. */\ntone?:string;config?:{label:string}}\n/** A contextual notice. */\nexport declare function Notice(props:NoticeProps):any;export declare function Provider(props:{children?:any}):any;`);
+    await write("Notice.stories.tsx", `import {Notice,Provider} from '${name}';export default {component:Notice};export const Default={render:()=> <Provider><Notice config={{label:'Published configuration'}}/></Provider>};`);
+    const configured = (await inspectLibrary(root, name, "1.0.0")).components.find((component) => component.export === "Notice")!;
+    expect(configured.props.config).toBeUndefined();
+    const blank = "export function Page(){return <main/>}";
+    const configuredSource = editSource(blank, { anchor: anchors(blank)[0].id, sourceHash: digest(blank), operation: "insert", component: configured }, [configured]);
+    expect(render(configuredSource, library)).toContain("Published configuration");
     await write("Notice.stories.tsx", `import {Notice,Provider} from '${name}';export default {component:Notice};export const Default={render:()=> <Provider mode={readMode()}><Notice/></Provider>};`);
     const unsupported = (await inspectLibrary(root, name, "1.0.0")).components.find((component) => component.export === "Notice")!;
     expect(unsupported.requiresBehavior).toBe(false);
