@@ -27,7 +27,7 @@ test("publication preserves native render uses through values, aliases, wrappers
   const vite = await createViteServer({ root: runtime, configFile: false, plugins: [react()], server: { host: "127.0.0.1", port: 0, hmr: false } });
   const secret = (await (await fetch(origin + "/api/session")).json()).secret;
   const request = async (id: string, snapshot: { id: string; files: Record<string, string> }, operation: string, tag: string, extra = {}) => {
-    const node = anchors(snapshot.files["src/pages/Page.tsx"]).find((node) => node.tag === tag)!;
+    const node = anchors(snapshot.files["src/pages/Page.tsx"]).find((node) => node.tag === tag && (tag !== "section" || !!node.parent))!;
     const response = await fetch(`${origin}/api/projects/${id}/edit`, { method: "POST", headers: { "Content-Type": "application/json", "X-Studio-Session": secret }, body: JSON.stringify({ base: snapshot.id, page: "page", edit: { anchor: node.id, sourceHash: digest(snapshot.files["src/pages/Page.tsx"]), operation, ...extra } }) });
     return { status: response.status, body: await response.json() };
   };
@@ -129,7 +129,7 @@ test("publication preserves native render uses through values, aliases, wrappers
       expect(rejected.body.error).toMatch(/control|preserv|compatibility/);
       expect((await studio.store.get(id)).snapshot).toEqual(snapshot);
       const source = snapshot.files["src/pages/Page.tsx"];
-      const region = anchors(source).find((node) => node.tag === "section")!;
+      const region = anchors(source).find((node) => node.tag === "section" && !!node.parent)!;
       const removal = editSource(source, { anchor: region.id, sourceHash: digest(source), operation: "remove", confirmedBusiness: true }, [], { files: snapshot.files, file: "src/pages/Page.tsx" });
       const removed = await studio.store.persist(id, { parent: snapshot.id, files: { ...snapshot.files, "src/pages/Page.tsx": removal, "requirements/notice.feature": snapshot.files["requirements/notice.feature"].replace("confirmation is available", "one confirmation is available") }, manifest: snapshot.manifest, label: "Reviewed removal", activeAnnotationResults: ["remove-result"] });
       const accepted = await studio.store.get(id);
