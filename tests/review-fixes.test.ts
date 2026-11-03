@@ -27,14 +27,16 @@ function render(source: string) {
   new Function("require", "exports", compiled)((name: string) => name === "react" ? React : jsxRuntime, exports);
   return renderToStaticMarkup(createElement(exports.Page));
 }
-it.each([false, true])("rejects newly active and duplicated local wrapper invocations at acceptance (factory: %s)", async (factory) => {
+it.each([false, true].flatMap((factory) => [
+  { factory, before: "false && <Wrapper/>", after: "true && <Wrapper/>" },
+  { factory, before: "<Wrapper/>", after: "<><Wrapper/><Wrapper/></>" },
+]))("rejects changed wrapper use $before (factory: $factory)", async ({ factory, before, after }) => {
   const root = await fs.mkdtemp(path.join(process.cwd(), ".review-fixes-"));
   try {
     const store = new ProjectStore(root);
       const legacy = factory ? `return React.createElement('button',null,'Confirm')` : `return <button>Confirm</button>`;
       const invocation = factory ? "React.createElement(Alias)" : "<Alias/>";
       const prefix = `import * as React from 'react';function Legacy(){${legacy}}const Alias=Legacy;function Wrapper(){return ${invocation}}`;
-      for (const [before, after] of [["false && <Wrapper/>", "true && <Wrapper/>"], ["<Wrapper/>", "<><Wrapper/><Wrapper/></>"]]) {
         const project = blankProject("Legacy wrapper");
         const source = prefix + `export function Page(){return <main>{${before}}</main>}`;
         const candidate = prefix + `export function Page(){return <main>{${after}}</main>}`;
@@ -44,7 +46,6 @@ it.each([false, true])("rejects newly active and duplicated local wrapper invoca
         await expect(store.commit(accepted.state.id, accepted.snapshot.id, { ...project.files, "src/pages/Page.tsx": candidate }, project.manifest, "Unsafe invocation")).rejects.toThrow(/control|invocation/i);
         expect((await store.get(accepted.state.id)).state.head).toBe(accepted.snapshot.id);
         expect(() => validateCapabilities({ ...project.files, "src/pages/Page.tsx": source.replace('<main>', '<main style={{padding:24}}>') }, project.manifest, project.files)).not.toThrow();
-      }
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 it("preserves local React provider ownership in both directions and through aliases", () => {
