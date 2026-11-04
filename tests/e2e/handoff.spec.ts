@@ -2,7 +2,6 @@ import { accountFreeAI } from "../account-free-ai";
 import { test, expect } from "@playwright/test";
 import { createServer } from "node:http";
 import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { createApp } from "../../server/app";
 import { registryFixture } from "../registry";
@@ -16,7 +15,9 @@ test("fresh source handoff preserves controllers, providers, styles and all scen
   browser,
 }) => {
   test.setTimeout(300_000);
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "studio-handoff-"));
+  const temporary = path.join(process.cwd(), "dist/client/.studio-validation");
+  await fs.mkdir(temporary, { recursive: true });
+  const root = await fs.mkdtemp(path.join(temporary, "handoff-"));
   const registry = await registryFixture(root);
   const previous = process.env.npm_config_userconfig;
   process.env.npm_config_userconfig = registry.config;
@@ -76,6 +77,7 @@ test("fresh source handoff preserves controllers, providers, styles and all scen
       report.results.map((r: any) => ({ name: r.name, failures: r.failures })),
     ).toEqual(report.results.map((r: any) => ({ name: r.name, failures: [] })));
     expect(report.ready).toBe(true);
+    await fs.writeFile(test.info().outputPath("handoff-quality.json"), JSON.stringify(report, null, 2));
     const snapshot = (await studio.store.get(id)).snapshot;
     const storybook = await studio.previews.startStorybook(snapshot);
     const page = await browser.newPage();
@@ -101,6 +103,22 @@ test("fresh source handoff preserves controllers, providers, styles and all scen
         fullPage: true,
         animations: "disabled",
       });
+    }
+    expect(errors).toEqual([]);
+    for (const exportName of ["Success", "Replacement"]) {
+      const reactSnapshot = structuredClone(snapshot);
+      reactSnapshot.manifest.pages[0].previewStory = `src/Notice.stories.tsx#${exportName}`;
+      const react = await studio.previews.start(reactSnapshot);
+      try {
+        await page.goto(react.url);
+        await expect(page.getByRole("heading", { name: "Notice workspace" })).toBeVisible();
+        await page.getByRole("button", { name: "Acknowledge" }).click();
+        await expect(page.getByRole("alert")).toHaveText("Name is required");
+        await page.getByRole("textbox", { name: "Your name" }).fill("Alex");
+        await page.getByRole("button", { name: "Acknowledge" }).click();
+        await expect(page.getByRole("status", { name: "Acknowledgement" })).toHaveText("Acknowledged Alex");
+        await page.screenshot({ path: test.info().outputPath(`React-${exportName}.png`), fullPage: true, animations: "disabled" });
+      } finally { studio.previews.stop(react.id); }
     }
     expect(errors).toEqual([]);
     await page.close();
@@ -157,6 +175,7 @@ test("fresh source handoff preserves controllers, providers, styles and all scen
       },
     );
     expect(scenarios.code, scenarios.stdout + scenarios.stderr).toBe(0);
+    await fs.writeFile(test.info().outputPath("exported-scenarios.log"), scenarios.stdout + scenarios.stderr);
     const again = await request("/import", {
       archive: exportArchive(
         exported,
@@ -167,6 +186,20 @@ test("fresh source handoff preserves controllers, providers, styles and all scen
     expect(again.snapshot.files["src/pages/Page.tsx"]).toBe(
       exported["src/pages/Page.tsx"],
     );
+    const reopened = await request(`/projects/${again.state.id}`);
+    const reopenedMain = reopened.outline[0].nodes.find((node: any) => node.tag === "main");
+    const editedAgain = await request(`/projects/${again.state.id}/edit`, {
+      base: reopened.snapshot.id, page: "page",
+      edit: { anchor: reopenedMain.id, sourceHash: reopened.outline[0].hash, operation: "style", value: { padding: 56 } },
+    });
+    const secondResponse = await fetch(origin + `/api/projects/${again.state.id}/export`, { headers: { "X-Studio-Session": session.secret } });
+    expect(secondResponse.ok).toBe(true);
+    const secondExport = readArchive(Buffer.from(await secondResponse.arrayBuffer()));
+    expect(secondExport["src/pages/Page.tsx"]).toBe(editedAgain.snapshot.files["src/pages/Page.tsx"]);
+    expect(secondExport["src/pages/Page.tsx"]).not.toBe(exported["src/pages/Page.tsx"]);
+    for (const file of ["src/data/notices.ts", "src/providers.tsx", "src/styles.css", "src/Notice.stories.tsx", "requirements/notices.feature", "package-lock.json"])
+      expect(secondExport[file]).toBe(exported[file]);
+    await fs.writeFile(test.info().outputPath("roundtrip.json"), JSON.stringify({ first: imported.snapshot.id, reopened: reopened.snapshot.id, edited: editedAgain.snapshot.id, retainedFiles: ["src/data/notices.ts", "src/providers.tsx", "src/styles.css", "src/Notice.stories.tsx", "requirements/notices.feature", "package-lock.json"] }, null, 2));
     // Deliberately wrong behavior must not pass by putting Then before When.
     const wrong = structuredClone(prototype);
     wrong.files["requirements/notices.feature"] = "Feature: Keep a name\nScenario: Name remains Alex\nGiven the notice workspace is open\nWhen I enter Jordan\nThen the name is Alex\n";
@@ -187,6 +220,8 @@ test("fresh source handoff preserves controllers, providers, styles and all scen
     expect(failedExport.code).not.toBe(0);
     expect(failedExport.stdout + failedExport.stderr).toContain("Jordan");
     expect(failedExport.stdout).toContain("1 failed");
+    await fs.writeFile(test.info().outputPath("scenario-order-rejected.json"), JSON.stringify(failed, null, 2));
+    await fs.writeFile(test.info().outputPath("exported-scenario-order-rejected.log"), failedExport.stdout + failedExport.stderr);
   } finally {
     await studio.close();
     server.closeAllConnections();

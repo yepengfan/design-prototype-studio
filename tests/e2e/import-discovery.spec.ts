@@ -11,7 +11,9 @@ import { accountFreeAI } from "../account-free-ai";
 
 test("legacy import admits documented resolved components through factories, aliases, destructuring and barrels", async ({ page }) => {
   test.setTimeout(240000);
-  const root = await fs.mkdtemp(path.join(process.cwd(), ".import-discovery-"));
+  const temporary = path.join(process.cwd(), "dist/client/.studio-validation");
+  await fs.mkdir(temporary, { recursive: true });
+  const root = await fs.mkdtemp(path.join(temporary, "import-discovery-"));
   const registry = await registryFixture(root);
   const prior = process.env.npm_config_userconfig;
   process.env.npm_config_userconfig = registry.config;
@@ -59,7 +61,7 @@ test("legacy import admits documented resolved components through factories, ali
     expect(inspection.diagnostics).toEqual([]);
     const imported = await request("/import", { archive, requirements, confirm: true, previewStories: { "page-1": "src/Page.stories.tsx#Default" } });
     expect(imported.snapshot.manifest.libraries.map((library: { name: string }) => library.name)).toEqual([name]);
-    const experience = async () => {
+    const experience = async (stage: string) => {
       const preview = await request(`/projects/${imported.state.id}/preview`, { page: "page-1" });
       await page.goto(preview.url);
       await expect(page.getByRole("heading", { name: "Imported forms" })).toBeVisible();
@@ -69,14 +71,16 @@ test("legacy import admits documented resolved components through factories, ali
         await field.fill("Alex");
         await expect(field).toHaveValue("Alex");
       }
+      if (stage === "edited") await expect(page.getByRole("main")).toHaveCSS("padding", "32px");
+      await page.screenshot({ path: test.info().outputPath(`import-${stage}.png`), fullPage: true, animations: "disabled" });
       studio.previews.stop(preview.id);
     };
-    await experience();
+    await experience("original");
     const current = await fetch(origin + `/api/projects/${imported.state.id}`, { headers: { "X-Studio-Session": secret } });
     expect(current.status).toBe(200);
     const outline = await current.json();
     const main = outline.outline[0].nodes.find((node: { tag: string }) => node.tag === "main");
     await request(`/projects/${imported.state.id}/edit`, { base: outline.snapshot.id, page: "page-1", edit: { anchor: main.id, sourceHash: outline.outline[0].hash, operation: "style", value: { padding: 32 } } });
-    await experience();
+    await experience("edited");
   } finally { await studio.close(); await new Promise<void>((resolve) => server.close(() => resolve())); await registry.close(); if (prior === undefined) delete process.env.npm_config_userconfig; else process.env.npm_config_userconfig = prior; await fs.rm(root, { recursive: true, force: true }); }
 });
