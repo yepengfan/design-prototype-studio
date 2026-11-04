@@ -1,15 +1,13 @@
+import { e2eFixture } from "../e2e-fixture";
 import { test, expect } from "@playwright/test";
 import { createServer } from "node:http";
 import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { createServer as createViteServer } from "vite";
 import { createApp } from "../../server/app";
 let cleanup: () => Promise<void>;
 test.beforeAll(async () => {
-  const root = await fs.mkdtemp(
-    path.join(os.tmpdir(), "studio-annotation-e2e-"),
-  );
+  const root = await e2eFixture("studio-annotation-e2e-");
   const studio = await createApp({
     root,
     origin: "http://127.0.0.1:4311",

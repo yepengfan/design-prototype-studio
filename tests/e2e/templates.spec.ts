@@ -1,7 +1,7 @@
+import { e2eFixture } from "../e2e-fixture";
 import { test, expect } from "@playwright/test";
 import { createServer } from "node:http";
 import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { createApp } from "../../server/app";
 import { registryFixture } from "../registry";
@@ -14,7 +14,7 @@ test("saved and published page templates retain source and require atomic reconc
   browser,
 }) => {
   test.setTimeout(300000);
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "studio-template-e2e-"));
+  const root = await e2eFixture("studio-template-e2e-");
   const registry = await registryFixture(root);
   const prior = process.env.npm_config_userconfig,
     cache = process.env.npm_config_cache;

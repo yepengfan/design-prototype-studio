@@ -1,3 +1,4 @@
+import { e2eFixture } from "../e2e-fixture";
 import { test, expect } from "@playwright/test";
 import { createServer } from "node:http";
 import { promises as fs } from "node:fs";
@@ -10,7 +11,7 @@ import { writeFiles } from "../../server/core/files";
 import { accountFreeAI } from "../account-free-ai";
 
 test("runtime factory proposals are diagnosed before publication while authored JSX and createElement remain editable", async ({ page }) => {
-  const root = await fs.mkdtemp(path.join(process.cwd(), ".runtime-e2e-"));
+  const root = await e2eFixture(".runtime-e2e-");
   const runtime = path.join(root, "runtime");
   await fs.mkdir(runtime);
   await fs.symlink(path.resolve("node_modules"), path.join(runtime, "node_modules"), "dir");
@@ -22,7 +23,7 @@ test("runtime factory proposals are diagnosed before publication while authored 
   const studio = await createApp({ root: path.join(root, "studio"), origin, ai: accountFreeAI });
   studio.previews.verify = async () => {};
   server.on("request", studio.app);
-  const vite = await createViteServer({ root: runtime, configFile: false, plugins: [react()], server: { host: "127.0.0.1", port: 0, hmr: false } });
+  const vite = await createViteServer({ root: runtime, configFile: false, plugins: [react()], server: { host: "127.0.0.1", port: 0, hmr: false, watch: null } });
   try {
     const secret = (await (await fetch(origin + "/api/session")).json()).secret;
     const project = blankProject("Runtime boundary");

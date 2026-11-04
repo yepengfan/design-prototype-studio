@@ -1,8 +1,8 @@
+import { e2eFixture } from "../e2e-fixture";
 import { accountFreeAI } from "../account-free-ai";
 import { test, expect } from "@playwright/test";
 import { createServer } from "node:http";
 import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { createApp } from "../../server/app";
 import AdmZip from "adm-zip";
@@ -12,9 +12,7 @@ test("published types and CSF recipes admit controlled components with their ori
   browser,
 }) => {
   test.setTimeout(300000);
-  const root = await fs.mkdtemp(
-    path.join(os.tmpdir(), "studio-story-library-"),
-  );
+  const root = await e2eFixture("studio-story-library-");
   const registry = await registryFixture(root);
   const prior = process.env.npm_config_userconfig;
   process.env.npm_config_userconfig = registry.config;

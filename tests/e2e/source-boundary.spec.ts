@@ -1,3 +1,4 @@
+import { e2eFixture } from "../e2e-fixture";
 import { test, expect } from "@playwright/test";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -13,7 +14,7 @@ import { digest, writeFiles } from "../../server/core/files";
 
 test("publication preserves native render uses through values, aliases, wrappers and factories", async ({ page }) => {
   test.setTimeout(240000);
-  const root = await fs.mkdtemp(path.join(process.cwd(), ".source-boundary-"));
+  const root = await e2eFixture(".source-boundary-");
   const runtime = path.join(root, "runtime");
   await fs.mkdir(runtime);
   await fs.symlink(path.resolve("node_modules"), path.join(runtime, "node_modules"), "dir");
@@ -27,7 +28,7 @@ test("publication preserves native render uses through values, aliases, wrappers
   server.on("request", studio.app);
   const consumerFile = path.join(root, "consumer.tsx");
   await fs.writeFile(consumerFile, `import {createElement as h} from "react";export function Once({children}){return h("aside",null,children)}export function Twice({children}){return h("aside",null,children,children)}`);
-  const vite = await createViteServer({ resolve: { alias: { "@fixture/consumer": consumerFile } }, root: runtime, configFile: false, plugins: [react()], server: { host: "127.0.0.1", port: 0, hmr: false } });
+  const vite = await createViteServer({ resolve: { alias: { "@fixture/consumer": consumerFile } }, root: runtime, configFile: false, plugins: [react()], server: { host: "127.0.0.1", port: 0, hmr: false, watch: null } });
   const secret = (await (await fetch(origin + "/api/session")).json()).secret;
   const request = async (id: string, snapshot: { id: string; files: Record<string, string> }, operation: string, tag: string, extra = {}) => {
     const node = anchors(snapshot.files["src/pages/Page.tsx"]).find((node) => node.tag === tag && (tag !== "section" || !!node.parent))!;

@@ -1,3 +1,4 @@
+import { e2eFixture } from "../e2e-fixture";
 import { accountFreeAI } from "../account-free-ai";
 import { test, expect } from "@playwright/test";
 import { createServer } from "node:http";
@@ -15,9 +16,7 @@ test("fresh source handoff preserves controllers, providers, styles and all scen
   browser,
 }) => {
   test.setTimeout(300_000);
-  const temporary = path.join(process.cwd(), "dist/client/.studio-validation");
-  await fs.mkdir(temporary, { recursive: true });
-  const root = await fs.mkdtemp(path.join(temporary, "handoff-"));
+  const root = await e2eFixture("handoff-");
   const registry = await registryFixture(root);
   const previous = process.env.npm_config_userconfig;
   process.env.npm_config_userconfig = registry.config;

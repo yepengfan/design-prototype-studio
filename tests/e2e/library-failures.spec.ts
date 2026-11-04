@@ -1,17 +1,15 @@
+import { e2eFixture } from "../e2e-fixture";
 import { accountFreeAI } from "../account-free-ai";
 import { test, expect } from "@playwright/test";
 import { createServer } from "node:http";
 import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { createApp } from "../../server/app";
 import { registryFixture } from "../registry";
 
 test("library admission rejects missing runtime exports, styles, providers and required example properties without changing the project", async () => {
   test.setTimeout(240000);
-  const root = await fs.mkdtemp(
-    path.join(os.tmpdir(), "studio-library-gap-e2e-"),
-  );
+  const root = await e2eFixture("studio-library-gap-e2e-");
   const registry = await registryFixture(root);
   const prior = process.env.npm_config_userconfig;
   process.env.npm_config_userconfig = registry.config;

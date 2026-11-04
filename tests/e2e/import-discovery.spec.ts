@@ -1,3 +1,4 @@
+import { e2eFixture } from "../e2e-fixture";
 import { test, expect } from "@playwright/test";
 import { createServer } from "node:http";
 import { promises as fs } from "node:fs";
@@ -11,9 +12,7 @@ import { accountFreeAI } from "../account-free-ai";
 
 test("legacy import admits documented resolved components through factories, aliases, destructuring and barrels", async ({ page }) => {
   test.setTimeout(240000);
-  const temporary = path.join(process.cwd(), "dist/client/.studio-validation");
-  await fs.mkdir(temporary, { recursive: true });
-  const root = await fs.mkdtemp(path.join(temporary, "import-discovery-"));
+  const root = await e2eFixture("import-discovery-");
   const registry = await registryFixture(root);
   const prior = process.env.npm_config_userconfig;
   process.env.npm_config_userconfig = registry.config;

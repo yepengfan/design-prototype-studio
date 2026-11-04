@@ -1,8 +1,8 @@
+import { e2eFixture } from "../e2e-fixture";
 import { accountFreeAI } from "../account-free-ai";
 import { test, expect } from "@playwright/test";
 import { createServer } from "node:http";
 import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { createServer as createViteServer } from "vite";
 import { createApp } from "../../server/app";
@@ -10,7 +10,7 @@ import { registryFixture } from "../registry";
 let cleanup: () => Promise<void>;
 let registry: Awaited<ReturnType<typeof registryFixture>>;
 test.beforeAll(async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "studio-e2e-"));
+  const root = await e2eFixture("studio-e2e-");
   registry = await registryFixture(root);
   const prior = process.env.npm_config_userconfig;
   process.env.npm_config_userconfig = registry.config;

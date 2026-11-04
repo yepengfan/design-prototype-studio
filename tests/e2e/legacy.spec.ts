@@ -1,7 +1,7 @@
+import { e2eFixture } from "../e2e-fixture";
 import { test, expect } from "@playwright/test";
 import { createServer } from "node:http";
 import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import AdmZip from "adm-zip";
 import { anchors, editSource } from "../../server/core/source";
@@ -15,7 +15,7 @@ test("legacy CSF source keeps controllers, providers, decorators and styles thro
   browser,
 }) => {
   test.setTimeout(240000);
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "studio-legacy-e2e-"));
+  const root = await e2eFixture("studio-legacy-e2e-");
   const registry = await registryFixture(root);
   const prior = process.env.npm_config_userconfig;
   process.env.npm_config_userconfig = registry.config;

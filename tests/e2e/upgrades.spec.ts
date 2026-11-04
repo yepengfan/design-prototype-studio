@@ -1,8 +1,8 @@
+import { e2eFixture } from "../e2e-fixture";
 import { accountFreeAI } from "../account-free-ai";
 import { test, expect } from "@playwright/test";
 import { createServer } from "node:http";
 import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { createApp } from "../../server/app";
 import { registryFixture } from "../registry";
@@ -13,7 +13,7 @@ test("upgrade review preserves the pinned page until confirmation and exact rest
   browser,
 }) => {
   test.setTimeout(600000);
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "studio-upgrade-"));
+  const root = await e2eFixture("studio-upgrade-");
   const registry = await registryFixture(root);
   const prior = process.env.npm_config_userconfig,
     cache = process.env.npm_config_cache;

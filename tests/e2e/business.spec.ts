@@ -1,7 +1,7 @@
+import { e2eFixture } from "../e2e-fixture";
 import { test, expect } from "@playwright/test";
 import { createServer } from "node:http";
 import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { createApp } from "../../server/app";
 import { registryFixture } from "../registry";
@@ -12,7 +12,7 @@ test("business changes require matching Gherkin confirmation and restore source,
   browser,
 }) => {
   test.setTimeout(300000);
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "studio-business-e2e-"));
+  const root = await e2eFixture("studio-business-e2e-");
   const registry = await registryFixture(root);
   const prior = process.env.npm_config_userconfig;
   process.env.npm_config_userconfig = registry.config;

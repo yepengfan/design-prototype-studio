@@ -1,8 +1,8 @@
+import { e2eFixture } from "../e2e-fixture";
 import type {Proposal} from "../../server/core/contracts";
 import { test, expect } from "@playwright/test";
 import { createServer } from "node:http";
 import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { createServer as createViteServer } from "vite";
 import { createApp } from "../../server/app";
@@ -18,7 +18,7 @@ test("a new selected scope can generate its current page while preserving indepe
   page,
 }) => {
   test.setTimeout(240000);
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "studio-scope-"));
+  const root = await e2eFixture("studio-scope-");
   const registry = await registryFixture(root);
   const prior = process.env.npm_config_userconfig;
   process.env.npm_config_userconfig = registry.config;

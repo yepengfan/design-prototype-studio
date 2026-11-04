@@ -1,3 +1,4 @@
+import { e2eFixture } from "../e2e-fixture";
 import { test, expect } from "@playwright/test";
 import { createServer } from "node:http";
 import { promises as fs } from "node:fs";
@@ -12,7 +13,7 @@ import { accountFreeAI } from "../account-free-ai";
 
 test("optional components retain render-recipe providers or report insertion setup gaps before publication", async ({ browser }) => {
   test.setTimeout(300000);
-  const root = await fs.mkdtemp(path.join(process.cwd(), ".render-setup-e2e-"));
+  const root = await e2eFixture(".render-setup-e2e-");
   const registry = await registryFixture(root);
   const previous = process.env.npm_config_userconfig;
   process.env.npm_config_userconfig = registry.config;
@@ -82,7 +83,7 @@ test("optional components retain render-recipe providers or report insertion set
         expect(manifest.styles).toContain(name + "/appearance.css");
         const fresh = path.join(root, "exported");
         await installProject(fresh, exported, manifest.libraries);
-        const vite = await createViteServer({ root: fresh, configFile: false, plugins: [react()], server: { host: "127.0.0.1", port: 0, hmr: false } });
+        const vite = await createViteServer({ root: fresh, configFile: false, plugins: [react()], server: { host: "127.0.0.1", port: 0, hmr: false, watch: null } });
         try {
           await vite.listen();
           await page.goto(vite.resolvedUrls!.local[0]);

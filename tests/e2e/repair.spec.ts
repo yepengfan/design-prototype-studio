@@ -1,7 +1,7 @@
+import { e2eFixture } from "../e2e-fixture";
 import { test, expect } from "@playwright/test";
 import { createServer } from "node:http";
 import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { createApp } from "../../server/app";
 import { registryFixture } from "../registry";
@@ -10,7 +10,7 @@ import { exportArchive } from "../../server/core/archive";
 
 test("failed reviewed scenarios trigger a bounded staged repair without changing requirements, plans or accepted source", async () => {
   test.setTimeout(300000);
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "studio-repair-e2e-"));
+  const root = await e2eFixture("studio-repair-e2e-");
   const registry = await registryFixture(root);
   const prior = process.env.npm_config_userconfig;
   process.env.npm_config_userconfig = registry.config;
