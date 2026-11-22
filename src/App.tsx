@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ComponentSearch } from "@/components/ComponentSearch";
@@ -32,7 +32,11 @@ export function App() {
   const [importPrompt, setImportPrompt] = useState<string>();
   const [buildKey, setBuildKey] = useState("initial");
 
+  const running = useRef(false);
+
   const run = useCallback(async (action: () => Promise<void>) => {
+    if (running.current) return;
+    running.current = true;
     setBusy(true);
     setError(undefined);
     try {
@@ -43,6 +47,7 @@ export function App() {
         details: cause instanceof ApiError ? cause.details : [],
       });
     } finally {
+      running.current = false;
       setBusy(false);
     }
   }, []);
@@ -153,9 +158,14 @@ export function App() {
                   ? [...project.selectedSystemIds, systemId]
                   : project.selectedSystemIds.filter((id) => id !== systemId);
                 // Shown at once so the control answers the click, then reconciled.
-                setProject({ ...project, selectedSystemIds: next });
                 void run(async () => {
-                  setProject((await api.selectSystems(project.id, next)).project);
+                  setProject({ ...project, selectedSystemIds: next });
+                  try {
+                    setProject((await api.selectSystems(project.id, next)).project);
+                  } catch (cause) {
+                    setProject((await api.getProject(project.id)).project);
+                    throw cause;
+                  }
                 });
               }}
             />
@@ -163,12 +173,18 @@ export function App() {
             <ComponentSearch query={query} components={components} onQueryChange={setQuery} />
 
             <TemplatePicker
+              busy={busy}
               templates={templates}
               selectedId={project.selectedTemplateId}
               onSelect={(templateId) => {
-                setProject({ ...project, selectedTemplateId: templateId });
                 void run(async () => {
-                  setProject((await api.selectTemplate(project.id, templateId)).project);
+                  setProject({ ...project, selectedTemplateId: templateId });
+                  try {
+                    setProject((await api.selectTemplate(project.id, templateId)).project);
+                  } catch (cause) {
+                    setProject((await api.getProject(project.id)).project);
+                    throw cause;
+                  }
                 });
               }}
             />

@@ -4,11 +4,12 @@ import type { CatalogTemplate } from "@/lib/api";
 
 type Props = {
   templates: CatalogTemplate[];
+  busy: boolean;
   selectedId?: string;
   onSelect: (templateId: string) => void;
 };
 
-export function TemplatePicker({ templates, selectedId, onSelect }: Props) {
+export function TemplatePicker({ templates, selectedId, onSelect, busy }: Props) {
   return (
     <Card data-testid="template-picker">
       <CardHeader>
@@ -28,6 +29,7 @@ export function TemplatePicker({ templates, selectedId, onSelect }: Props) {
               <li key={template.id}>
                 <label className="hover:bg-accent/50 flex cursor-pointer items-start gap-3 rounded-md border p-3">
                   <input
+                    disabled={busy}
                     type="radio"
                     name="template"
                     className="accent-primary mt-1 size-4"

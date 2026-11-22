@@ -53,7 +53,7 @@ export function NotesPanel({
               value={note}
               onChange={(event) => onNoteChange(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === "Enter" && note.trim()) onQueue();
+                if (event.key === "Enter" && !busy && note.trim()) onQueue();
               }}
             />
             <div className="flex gap-2">
@@ -80,6 +80,7 @@ export function NotesPanel({
                   </span>
                 </span>
                 <Button
+                  disabled={busy}
                   size="sm"
                   variant="ghost"
                   onClick={() => onRemove(annotation.id)}
@@ -99,7 +100,7 @@ export function NotesPanel({
         {lastBatch && (
           <div className="grid gap-1 rounded-md border p-3" data-testid="delivery-receipt">
             <span className="flex flex-wrap items-center gap-2 text-sm font-medium">
-              Delivered
+              {lastBatch.delivery.transport === "command" ? "Delivered" : "Written for agent pickup"}
               <Badge variant="secondary">{lastBatch.delivery.transport}</Badge>
             </span>
             <span className="text-muted-foreground text-xs">{lastBatch.delivery.receipt}</span>

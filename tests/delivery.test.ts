@@ -65,7 +65,7 @@ describe("renderBriefing", () => {
   });
 
   it("anchors each note to its page and element", () => {
-    expect(briefing).toContain("**Show overdue** — Call this Overdue only");
+    expect(briefing).toContain("**Show overdue** - Call this Overdue only");
     expect(briefing).toContain("Page: Orders (src/app/page.tsx)");
     expect(briefing).toContain("Anchor: control-show-overdue");
     expect(briefing).toContain('[data-studio-anchor="control-show-overdue"] > button:nth-child(1)');

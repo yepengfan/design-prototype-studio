@@ -43,8 +43,7 @@ export function generatePage(input: GenerationInput): GeneratedSource {
     return component;
   };
 
-  const dataTable = plan.blocks.find((block) => block.type === "data-table");
-  const dataset = dataTable?.dataset;
+  const dataset = plan.blocks.find((block) => block.dataset)?.dataset;
   const filters = plan.blocks.filter(
     (block) => block.type === "filter-toggle" || block.type === "text-filter" || block.type === "select-filter",
   );
@@ -61,11 +60,6 @@ export function generatePage(input: GenerationInput): GeneratedSource {
         use(block.componentIds[0]!, "Button");
         state.push(`  const [${stateName(block)}, ${setterName(block)}] = useState(false)`);
         body.push(renderToggle(block));
-        break;
-      }
-      case "action": {
-        use(block.componentIds[0]!, "Button");
-        body.push(renderAction(block));
         break;
       }
       case "text-filter": {
@@ -185,14 +179,6 @@ function renderToggle(block: PlanBlock): string {
   ].join("\n");
 }
 
-function renderAction(block: PlanBlock): string {
-  return [
-    `<div className="flex flex-wrap items-center gap-2" data-studio-anchor="${block.anchor}">`,
-    `  <Button variant="outline">${escapeText(block.label ?? "Action")}</Button>`,
-    `</div>`,
-  ].join("\n");
-}
-
 function renderTextFilter(block: PlanBlock): string {
   return [
     `<div className="grid max-w-sm gap-2" data-studio-anchor="${block.anchor}">`,
@@ -226,7 +212,8 @@ function renderSelectFilter(block: PlanBlock): string {
 }
 
 function renderSummary(block: PlanBlock, dataset: Dataset | undefined): string {
-  const value = dataset ? `{visibleRows.length}` : `{0}`;
+  if (!dataset) throw new StudioError("A row count summary needs the rows its scenario listed.");
+  const value = `{visibleRows.length}`;
   return [
     `<Card data-studio-anchor="${block.anchor}" className="max-w-xs">`,
     `  <CardHeader>`,

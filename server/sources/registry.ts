@@ -34,7 +34,8 @@ export async function importRegistry(
   spec: RegistrySourceSpec,
 ): Promise<RegistryImport> {
   const warnings: string[] = [];
-  const entries = (await fetchIndex(spec)).filter((entry) =>
+  const index = await fetchIndex(spec);
+  const entries = index.filter((entry) =>
     componentTypes.has(entry.type ?? "registry:ui"),
   );
 
@@ -75,7 +76,7 @@ export async function importRegistry(
     );
 
   const templates: CatalogTemplate[] = [];
-  for (const name of spec.blocks ?? []) {
+  for (const name of new Set([...index.filter((entry) => blockTypes.has(entry.type ?? "")).map((entry) => entry.name), ...(spec.blocks ?? [])])) {
     const url = itemUrl(spec, name);
     try {
       if (!(await documentExists(url))) {

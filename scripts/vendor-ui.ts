@@ -22,7 +22,6 @@ const wanted = [
   "scroll-area",
   "select",
   "separator",
-  "tabs",
   "textarea",
 ];
 

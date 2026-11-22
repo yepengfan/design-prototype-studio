@@ -12,8 +12,7 @@ export type DeliveryResult = AnnotationBatch["delivery"];
  *
  * Two transports are supported, and both leave the batch on disk so a review is
  * auditable after the fact. `command` runs a configured agent CLI with the
- * briefing on stdin and keeps its answer; `file` drops the briefing in an inbox
- * directory for an agent that watches it.
+ * briefing on stdin and keeps its answer; `file` writes a briefing for pickup.
  */
 export async function deliverBatch(
   project: Project,
@@ -38,7 +37,7 @@ export async function deliverBatch(
     return {
       transport: "file",
       target: briefingFile,
-      receipt: `${annotations.length} note${annotations.length === 1 ? "" : "s"} written for review.`,
+      receipt: `${annotations.length} note${annotations.length === 1 ? "" : "s"} written for an agent to pick up.`,
     };
 
   const reply = await runAgent(config.agentCommand, briefing);
@@ -75,7 +74,7 @@ export function renderBriefing(project: Project, batchId: string, annotations: A
   for (const [index, annotation] of annotations.entries()) {
     const page = pages.get(annotation.pageId);
     lines.push(
-      `${index + 1}. **${annotation.target.label}** — ${annotation.note}`,
+      `${index + 1}. **${annotation.target.label}** - ${annotation.note}`,
       `   - Page: ${annotation.pageTitle}${page ? ` (${page.path})` : ""}`,
       `   - Anchor: ${annotation.target.anchor ?? "none"}`,
       `   - Selector: \`${annotation.target.domPath}\``,
@@ -103,7 +102,8 @@ async function runAgent(command: string, input: string): Promise<string> {
               502,
             ),
           );
-        resolve(stdout.trim() || "The review agent returned no output.");
+        if (!stdout.trim()) return reject(new StudioError("The review agent returned no reply.", 502));
+        resolve(stdout.trim());
       },
     );
     child.stdin?.end(input);

@@ -46,6 +46,7 @@ export function DesignSystemsPanel({ project, presets, busy, prompt, onImport, o
               <li key={system.id} className="rounded-md border p-3">
                 <label className="flex items-start gap-3">
                   <input
+                    disabled={busy}
                     type="checkbox"
                     className="accent-primary mt-1 size-4"
                     checked={project.selectedSystemIds.includes(system.id)}

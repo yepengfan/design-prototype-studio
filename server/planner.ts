@@ -8,6 +8,7 @@ type Requirement = {
   block: Omit<PlanBlock, "componentIds">;
   /** Capabilities that must all resolve for the block to be generated. */
   needs: Capability[];
+  unsupported?: string;
 };
 
 /** Capabilities a Then step can name without the generator being able to build them. */
@@ -44,11 +45,18 @@ export function planPage(scenario: GherkinScenario, components: CatalogComponent
     const missing = resolved.filter((entry) => entry.matches.length === 0);
     const unsupported = resolved.filter((entry) => !isComposable(entry.capability));
 
-    if (missing.length || unsupported.length) {
+    if (missing.length || unsupported.length || requirement.unsupported) {
       for (const entry of missing) gaps.push(missingComponentGap(entry.capability, requirement.block.requirement));
       for (const entry of unsupported)
         if (!missing.some((candidate) => candidate.capability === entry.capability))
           gaps.push(unsupportedGap(entry.capability, requirement.block.requirement, entry.matches));
+      if (requirement.unsupported)
+        gaps.push({
+          capability: requirement.block.capability,
+          requirement: requirement.block.requirement,
+          reason: requirement.unsupported,
+          suggestion: "Reword the step to describe a supported filter or row count, or review this gap before proceeding.",
+        });
       continue;
     }
 
@@ -83,7 +91,6 @@ function layoutOrder(block: PlanBlock): number {
     "text-filter": 1,
     "select-filter": 2,
     "filter-toggle": 3,
-    action: 4,
     summary: 5,
     "data-table": 6,
   };
@@ -159,15 +166,15 @@ function readRequirements(scenario: GherkinScenario): Requirement[] {
       continue;
     }
 
-    if (pressed && values[0]) {
-      const label = values[0];
+    if (pressed) {
+      const label = values[0] ?? step.text;
       const column = dataset?.dataset.statusColumn;
       const value = column && dataset ? matchValue(label, dataset.dataset, column) : undefined;
       const hides = outcomes.some((outcome) => /\b(hidden|not (?:shown|visible)|disappears)\b/i.test(outcome.text));
       requirements.push({
         block: {
           anchor: anchorFor("control", label),
-          type: hides && value ? "filter-toggle" : "action",
+          type: "filter-toggle",
           capability: "button",
           requirement: step.text,
           label,
@@ -176,12 +183,13 @@ function readRequirements(scenario: GherkinScenario): Requirement[] {
           value,
         },
         needs: ["button"],
+        unsupported: hides && value && label.toLowerCase() === `show ${value}`.toLowerCase() ? undefined : `The action "${label}" has unsupported interaction semantics.`,
       });
     }
   }
 
   for (const step of outcomes) {
-    if (/\b(summary|total|totals|metric|count)\b/i.test(step.text) && dataset)
+    if (/\b(summary|total|totals|metric|count)\b/i.test(step.text))
       requirements.push({
         block: {
           anchor: anchorFor("summary", step.text),
@@ -189,9 +197,13 @@ function readRequirements(scenario: GherkinScenario): Requirement[] {
           capability: "card",
           requirement: step.text,
           label: summaryLabel(step.text),
-          column: dataset.dataset.statusColumn ?? dataset.dataset.columns[0],
+          dataset: dataset?.dataset,
+          column: dataset?.dataset.statusColumn ?? dataset?.dataset.columns[0],
         },
         needs: ["card"],
+        unsupported: dataset && /^row count$/i.test(summaryLabel(step.text))
+          ? undefined
+          : "This metric has unsupported aggregation semantics. Only an explicit Row count summary is supported.",
       });
 
     for (const [capability, phrase] of visualPhrases)

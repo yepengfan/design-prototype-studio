@@ -24,8 +24,14 @@ named gap rather than faked with a substitute component.
    it in an iframe.
 6. **Review.** *Interact* runs the prototype. *Annotate* turns clicks into
    anchored notes instead of actions.
-7. **Send.** Queued notes are delivered to a review agent as a briefing that
-   carries the scenario, the template, and each note's anchor.
+7. **Send.** Queued notes are written as a briefing for an agent to pick up.
+   With `STUDIO_AGENT_COMMAND` configured, the agent receives the briefing and
+   its reply is stored. Each briefing carries the scenario, template and anchors.
+
+The Studio is a strictly local, single-user tool. The API binds to `127.0.0.1`.
+Imported registry and npm code runs as trusted code on the designer's machine.
+The preview shares the Studio origin and can access its parent document and all
+project APIs; import only sources you trust with that access.
 
 ## Running it
 
@@ -74,7 +80,7 @@ tree no longer uses are pruned, which is also what strips a block's sample-only
 dependencies such as charting and drag-and-drop libraries.
 
 **Plans are derived from the scenario.** `server/planner.ts` turns each
-scenario into ordered blocks (heading, filters, actions, summary, table) using
+scenario into ordered blocks (heading, filters, row-count summary, table) using
 only capabilities the selected systems actually publish. A requirement with no
 matching component becomes a gap naming the Gherkin step that asked for it, and
 the designer is offered the choice to import another system or reword the step.

@@ -114,14 +114,14 @@ test.describe("the designer flow", () => {
       await expect(frame.locator('[data-studio-row="A-102"]')).toBeVisible();
     });
 
-    await test.step("send the batch to the review agent", async () => {
+    await test.step("write the batch for agent pickup", async () => {
       await page.getByTestId("send-notes").click();
       const receipt = page.getByTestId("delivery-receipt");
-      await expect(receipt).toContainText("Delivered");
-      await expect(receipt).toContainText("1 note written for review.");
+      await expect(receipt).toContainText("Written for agent pickup");
+      await expect(receipt).toContainText("1 note written for an agent to pick up.");
     });
 
-    await test.step("the agent receives the page, the anchor and the note", async () => {
+    await test.step("the pickup briefing contains the page, anchor and note", async () => {
       const files = await fs.readdir(deliveryDir);
       const briefingName = files.find((name) => name.endsWith(".md") && !name.endsWith(".reply.md"));
       expect(briefingName).toBeDefined();

@@ -63,5 +63,9 @@
         "type": "registry:ui"
       }
     ]
+  },
+  {
+    "name": "console-01",
+    "type": "registry:block"
   }
 ]

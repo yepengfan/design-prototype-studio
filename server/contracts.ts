@@ -136,7 +136,7 @@ export const datasetSchema = z.object({
 export const planBlockSchema = z.object({
   /** Stable anchor used by annotations and by generated markup. */
   anchor: z.string(),
-  type: z.enum(["heading", "data-table", "filter-toggle", "action", "text-filter", "select-filter", "summary"]),
+  type: z.enum(["heading", "data-table", "filter-toggle", "text-filter", "select-filter", "summary"]),
   capability: z.string(),
   /** Gherkin step text that asked for this block. */
   requirement: z.string(),

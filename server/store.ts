@@ -51,16 +51,29 @@ export async function loadProject(id: string): Promise<Project> {
   return project;
 }
 
-export async function saveProject(project: Project): Promise<Project> {
+async function saveProject(project: Project): Promise<Project> {
   await fs.mkdir(paths.project(project.id), { recursive: true });
-  await fs.writeFile(paths.projectFile(project.id), JSON.stringify(project, null, 2));
+  const temporary = `${paths.projectFile(project.id)}.tmp`;
+  await fs.writeFile(temporary, JSON.stringify(project, null, 2));
+  await fs.rename(temporary, paths.projectFile(project.id));
   return project;
 }
+
+const mutations = new Map<string, Promise<unknown>>();
 
 /** Applies a change to a stored project and persists the result. */
 export async function updateProject(
   id: string,
   change: (project: Project) => Project | Promise<Project>,
 ): Promise<Project> {
-  return saveProject(await change(await loadProject(id)));
+  const previous = mutations.get(id) ?? Promise.resolve();
+  const pending = previous.catch(() => undefined).then(async () =>
+    saveProject(await change(await loadProject(id))),
+  );
+  mutations.set(id, pending);
+  try {
+    return await pending;
+  } finally {
+    if (mutations.get(id) === pending) mutations.delete(id);
+  }
 }

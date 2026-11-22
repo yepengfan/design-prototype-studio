@@ -20,8 +20,8 @@ export default defineConfig({
   server: {
     port: Number(process.env.STUDIO_CLIENT_PORT ?? 5173),
     proxy: {
-      "/api": `http://localhost:${apiPort}`,
-      "/preview": `http://localhost:${apiPort}`,
+      "/api": `http://127.0.0.1:${apiPort}`,
+      "/preview": `http://127.0.0.1:${apiPort}`,
     },
   },
 });

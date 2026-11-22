@@ -27,6 +27,34 @@ function plan(gherkin: string, components = catalog) {
 }
 
 describe("planPage", () => {
+  it.each(['I click "Delete order"', 'I click "Delete overdue order"', "I click Delete order"])("reports unsupported action %s against its step", (step) => {
+    const result = plan(`${ordersGherkin}    When ${step}\n`);
+    expect(result.gaps).toEqual([expect.objectContaining({
+      capability: "button", requirement: step,
+      reason: expect.stringContaining("unsupported interaction"),
+    })]);
+    expect(result.blocks.filter((block) => block.type === "filter-toggle")).toHaveLength(1);
+  });
+
+  it.each(["Total amount", "Average amount", "Order total", "Count overdue orders"])("reports unsupported metric %s", (label) => {
+    const result = plan(`${ordersGherkin}    Then I see a "${label}" summary\n`);
+    expect(result.gaps).toEqual([expect.objectContaining({
+      capability: "card", requirement: `I see a "${label}" summary`,
+    })]);
+    expect(result.blocks.some((block) => block.type === "summary")).toBe(false);
+  });
+
+  it("reports summaries without mock rows as gaps", () => {
+    const result = plan('Feature: F\n  Scenario: S\n    Then I see a "Row count" summary\n');
+    expect(result.gaps).toEqual([expect.objectContaining({ capability: "card" })]);
+  });
+
+  it("supports an explicit row count", () => {
+    const result = plan(`${ordersGherkin}    Then I see a "Row count" summary\n`);
+    expect(result.gaps).toEqual([]);
+    expect(result.blocks.find((block) => block.type === "summary")?.label).toBe("Row count");
+  });
+
   it("names the page after the screen the scenario opens", () => {
     expect(plan(ordersGherkin).title).toBe("Orders");
   });

@@ -3,6 +3,12 @@ import { importRegistry, resolveClosure, resolveTemplate } from "../server/sourc
 import { fixtureRegistry } from "./fixtures.js";
 
 describe("importRegistry", () => {
+  it("discovers indexed templates without explicit block probes", async () => {
+    const spec = { ...fixtureRegistry, blocks: undefined };
+    const imported = await importRegistry("fixture", "Fixture UI", spec);
+    expect(imported.templates.map((template) => template.name)).toEqual(["console-01"]);
+  });
+
   it("builds a catalog from the registry's own items", async () => {
     const imported = await importRegistry("fixture", "Fixture UI", fixtureRegistry);
     expect(imported.components.map((component) => component.name)).toEqual([
