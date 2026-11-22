@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { compile } from "tailwindcss";
 import { Scanner } from "@tailwindcss/oxide";
-import { create } from "enhanced-resolve";
+import enhancedResolve from "enhanced-resolve";
 import * as esbuild from "esbuild";
 import { config, paths } from "./config.js";
 import { StudioError } from "./errors.js";
@@ -138,7 +138,7 @@ async function compileStyles(
   assertAllowedFile: (file: string) => Promise<void>,
 ): Promise<void> {
   try {
-    const resolveCss = create.sync({
+    const resolveCss = enhancedResolve.create.sync({
       extensions: [".css"], mainFields: ["style"], conditionNames: ["style"],
       modules: ["node_modules", path.join(config.repoRoot, "node_modules")],
     });
