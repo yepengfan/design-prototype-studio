@@ -19,7 +19,7 @@ export function importSpecifiers(source: string): string[] {
   return found;
 }
 
-/** Names the module exports, including the resolved name of a default export. */
+/** Names exported declarations and named export clauses, without resolving re-exports. */
 export function exportedNames(source: string): string[] {
   const file = parseModule(source);
   const names = new Set<string>();

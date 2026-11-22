@@ -8,9 +8,8 @@ import { StudioError } from "../errors.js";
 /**
  * Reads a registry document over HTTP(S) or `file:`, caching the body on disk.
  *
- * Registry payloads are immutable for a published version, so a disk cache keeps
- * repeated catalog reads and preview builds off the network without hiding the
- * real source: every cached entry records the URL it came from.
+ * The cache expires according to config.registryCacheSeconds so unversioned
+ * registry URLs can refresh. Each entry records its source URL.
  */
 export async function fetchDocument(url: string): Promise<string> {
   if (url.startsWith("file:")) return fs.readFile(fileURLToPath(url), "utf8");

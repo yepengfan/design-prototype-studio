@@ -11,8 +11,9 @@ named gap rather than faked with a substitute component.
 ## The flow
 
 1. **Import a design system.** A shadcn-compatible registry URL or a published
-   npm package. The Studio reads every published item to record what each
-   component really exports, and keeps the source URL as provenance.
+   npm package. Registry items are inspected for exports; npm packages must
+   publish typed React exports. Unusable items are reported as import warnings,
+   and catalog entries retain their provenance.
 2. **Search the catalog.** Components are indexed by name, export and
    capability (table, badge, chart, timeline, and so on).
 3. **Pick a page template.** Templates are the registry's own block items, for
@@ -29,12 +30,20 @@ named gap rather than faked with a substitute component.
    Without a configured agent, or if delivery fails, the notes stay queued.
    Each briefing carries the scenario, template and anchors.
 
+npm imports supply components, not templates. Keep a registry selected to
+provide the page template. Deselecting or re-importing its system clears the
+template selection. Regenerating replaces the current page; existing notes,
+including notes queued from an older browser tab, are marked as belonging to a
+prior generation.
+
 The Studio is a strictly local, single-user tool. The API binds to `127.0.0.1`.
 Imported registry and npm code runs in a sandboxed preview on an opaque origin.
 It cannot access the Studio document or project API. Mode and element selection
 pass through a narrow postMessage channel tied to the preview frame.
 
 ## Running it
+
+Use Node.js 22.6 or newer.
 
 ```bash
 npm install
@@ -56,10 +65,22 @@ npm run dev     # Studio on http://localhost:5173, API on 5174
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `5174` | API port |
+| `STUDIO_CLIENT_PORT` | `5173` | Vite development client port |
 | `STUDIO_DATA_DIR` | `.studio` | Projects, generated sources, registry cache |
 | `STUDIO_DELIVERY_DIR` | `<data>/deliveries` | Where note briefings are written |
 | `STUDIO_AGENT_COMMAND` | unset | Required for sending: receives the briefing on stdin and must answer on stdout |
+| `STUDIO_AGENT_TIMEOUT_MS` | `120000` | Maximum time for the review agent to answer |
 | `STUDIO_REGISTRY_CACHE_SECONDS` | `86400` | How long a fetched registry payload stays valid on disk |
+| `STUDIO_NETWORK_TIMEOUT_MS` | `30000` | Timeout per registry fetch |
+| `STUDIO_SHADCN_REGISTRY` | `https://ui.shadcn.com/r/styles/new-york-v4` | shadcn preset item base URL |
+| `STUDIO_SHADCN_INDEX` | `https://ui.shadcn.com/r/index.json` | shadcn preset catalog URL |
+| `STUDIO_SHADCN_COLORS` | `https://ui.shadcn.com/r/colors/neutral.json` | shadcn preset token URL |
+
+For Cursor review, install and authenticate its agent separately, then launch
+the Studio with `STUDIO_AGENT_COMMAND='cursor-agent -p' npm run dev`. The
+command is split on spaces into an executable and arguments; shell quoting,
+pipes and redirection are not interpreted. Sending requires a successful exit
+and a nonempty stdout reply. The Studio shows that reply with the sent batch.
 
 `STUDIO_DATA_DIR` must stay inside the repository: generated projects resolve
 React, Tailwind and the registry's own dependencies through the repository's
@@ -71,20 +92,26 @@ run here.
 
 ## How generation works
 
-**Templates are extracted, not hand-written.** `server/tsx.ts` parses the
-block's `page.tsx` with the TypeScript compiler API and walks down the JSX
-spine, following the single child or the child holding most of the component
-references. Everything passed on the way is chrome and is kept. The first
-element whose references are spread across several children is the content
-slot, and its children are replaced with `{children}`. Imports the remaining
-tree no longer uses are pruned, which is also what strips a block's sample-only
-dependencies such as charting and drag-and-drop libraries.
+**Templates are extracted, not hand-written.** The Studio preserves the block's
+layout around a generated content slot and prunes unused imports. See
+`extractLayout` in `server/tsx.ts` for the extraction rules and supported page
+shape.
 
 **Plans are derived from the scenario.** `server/planner.ts` turns each
 scenario into ordered blocks (heading, filters, row-count summary, table) using
 only capabilities the selected systems actually publish. A requirement with no
 matching component becomes a gap naming the Gherkin step that asked for it, and
 the designer is offered the choice to import another system or reword the step.
+
+The MVP supports one feature and one concrete scenario per generation, using
+the Orders pilot's `Given the following mock orders exist:` data table. Start
+with the supplied scenario in the editor. Supported interactions are text
+search, selecting a value from a matching column, and a `Show <status>` toggle;
+outcomes can describe visible orders, status badges, hidden orders and an
+explicit `Row count` summary. Multiple controls constraining the same column
+are reported as unsupported, as are other interaction semantics and visual
+blocks such as charts, even when a matching component is imported. Scenario
+Outlines are rejected. The step forms are defined in `server/planner.ts`.
 
 **Nothing is invented.** `server/generator.ts` fails loudly if a component it
 needs does not export the symbol the plan expects, so a prototype never renders

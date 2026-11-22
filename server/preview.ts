@@ -144,7 +144,7 @@ async function compileStyles(
     });
     const compiler = await compile(await fs.readFile(path.join(root, "src/styles.css"), "utf8"), {
       base: path.join(root, "src"),
-      loadModule: async () => { throw new Error("JavaScript plugins and configuration are not allowed in preview styles."); },
+      loadModule: () => Promise.reject(new Error("JavaScript plugins and configuration are not allowed in preview styles.")),
       loadStylesheet: async (id, base) => {
         const resolved = resolveCss(base, id);
         if (!resolved) throw new Error(`Could not resolve stylesheet ${id}`);
