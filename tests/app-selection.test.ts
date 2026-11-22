@@ -27,11 +27,11 @@ it.each(["A:template", "B:template"])("enables Generate only for an available te
   document.body.append(container);
   const root = createRoot(container);
   try {
-    await act(async () => root.render(createElement(App)));
+    await act(() => Promise.resolve(root.render(createElement(App))));
     expect(container.querySelector<HTMLInputElement>('input[aria-label="B console"]')).not.toBeNull();
     expect(container.querySelector<HTMLButtonElement>('[data-testid="generate"]')!.disabled).toBe(selectedTemplateId !== "B:template");
   } finally {
-    await act(async () => root.unmount());
+    await act(() => Promise.resolve(root.unmount()));
     container.remove();
     vi.unstubAllGlobals();
   }

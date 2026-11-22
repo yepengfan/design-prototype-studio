@@ -35,27 +35,29 @@ it("sends the displayed generation with notes after receiving newer project stat
   document.body.append(container);
   const root = createRoot(container);
   try {
-    await act(async () => root.render(createElement(App)));
+    await act(() => Promise.resolve(root.render(createElement(App))));
     const frame = container.querySelector("iframe")!;
     for (const note of ["First stale note", "Second stale note"]) {
-      await act(async () => {
+      await act(() => {
         window.dispatchEvent(new MessageEvent("message", {
           source: frame.contentWindow,
           data: { type: "studio:select", target: { label: "Show overdue", domPath: "button", anchor: "control-show-overdue" } },
         }));
+        return Promise.resolve();
       });
       const input = container.querySelector<HTMLInputElement>("#note")!;
-      await act(async () => {
+      await act(() => {
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, note);
         input.dispatchEvent(new Event("input", { bubbles: true }));
+        return Promise.resolve();
       });
-      await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="queue-note"]')!.click());
+      await act(() => Promise.resolve(container.querySelector<HTMLButtonElement>('[data-testid="queue-note"]')!.click()));
       expect(requests.at(-1)).toMatchObject({ pageId: "page", generatedAt, note });
     }
     expect(requests).toHaveLength(2);
     expect(container.querySelector("iframe")).toBe(frame);
   } finally {
-    await act(async () => root.unmount());
+    await act(() => Promise.resolve(root.unmount()));
     container.remove();
     vi.unstubAllGlobals();
   }

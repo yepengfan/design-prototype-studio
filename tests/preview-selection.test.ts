@@ -16,9 +16,9 @@ it("accepts only valid selection payloads from the preview frame", async () => {
     plan: { title: "Orders", scenario: "Orders", blocks: [], gaps: [] },
   };
   try {
-    await act(async () => root.render(createElement(PreviewPane, {
+    await act(() => Promise.resolve(root.render(createElement(PreviewPane, {
       projectId: "project", page, mode: "annotate", buildKey: "build", onModeChange: vi.fn(), onSelect,
-    })));
+    }))));
     const frame = container.querySelector("iframe")!;
     for (const target of [{ label: { invalid: true }, domPath: "button" }, null, { label: "Missing path" }]) {
       window.dispatchEvent(new MessageEvent("message", { source: frame.contentWindow, data: { type: "studio:select", target } }));
@@ -31,7 +31,7 @@ it("accepts only valid selection payloads from the preview frame", async () => {
     expect(onSelect).toHaveBeenCalledExactlyOnceWith(target);
     expect(container.querySelector("iframe")).toBe(frame);
   } finally {
-    await act(async () => root.unmount());
+    await act(() => Promise.resolve(root.unmount()));
     container.remove();
     vi.unstubAllGlobals();
   }

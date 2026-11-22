@@ -22,7 +22,8 @@ it("starts the API in Node's native ESM runtime", async () => {
         }
       `,
     ], { env: { ...process.env, STUDIO_DATA_DIR: dataDir }, timeout: 20_000 });
-    expect(JSON.parse(stdout)).toMatchObject({ presets: expect.any(Array) });
+    const payload = JSON.parse(stdout) as { presets: unknown };
+    expect(payload.presets).toEqual(expect.any(Array));
   } finally {
     await fs.rm(dataDir, { recursive: true, force: true });
   }
