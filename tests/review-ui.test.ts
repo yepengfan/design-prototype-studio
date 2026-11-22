@@ -17,18 +17,19 @@ const project: Project = {
 };
 
 describe("feedback and selection controls", () => {
-  it.each(["file", "command"] as const)("labels %s receipts honestly and blocks removal while busy", (transport) => {
+  it("shows the agent's own answer on a receipt and blocks removal while busy", () => {
     const markup = renderToStaticMarkup(createElement(NotesPanel, {
       project: { ...project, batches: [{
         id: "batch", projectId: project.id, createdAt: "2026-01-01", annotations: [annotation],
-        delivery: { transport, target: "review", receipt: "Review receipt", reply: transport === "command" ? "Reviewed" : undefined },
+        delivery: { transport: "command", target: "review", receipt: "Review receipt", reply: "Reviewed" },
       }] },
       busy: true, note: "", onNoteChange: ignore, onQueue: ignore,
       onDiscard: ignore, onRemove: ignore, onSend: ignore,
     }));
     const document = new JSDOM(markup).window.document;
-    expect(document.querySelector('[data-testid="delivery-receipt"]')?.textContent)
-      .toContain(transport === "command" ? "Delivered" : "Written for agent pickup");
+    const receipt = document.querySelector('[data-testid="delivery-receipt"]')?.textContent;
+    expect(receipt).toContain("Delivered");
+    expect(receipt).toContain("Reviewed");
     expect(document.querySelector('button[aria-label="Remove note Review this"]')?.hasAttribute("disabled")).toBe(true);
   });
 

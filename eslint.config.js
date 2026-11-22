@@ -5,7 +5,7 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["dist", ".studio", "src/components/ui", "playwright-report", "test-results"],
+    ignores: ["dist", ".studio", "src/components/ui", "playwright-report", "test-results", "tests/fixtures/*.mjs"],
   },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,

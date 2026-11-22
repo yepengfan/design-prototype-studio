@@ -1,5 +1,6 @@
 import path from "node:path";
 import { expect, test } from "@playwright/test";
+import { openFreshStudio } from "./fresh-studio.js";
 
 /**
  * Captures the Studio at the points of the flow a designer looks at, so the
@@ -29,7 +30,7 @@ test("capture the studio at each step", async ({ page }) => {
   const shot = (name: string) =>
     page.screenshot({ path: path.join(outputDir!, `${name}.png`), animations: "disabled" });
 
-  await page.goto("/");
+  await openFreshStudio(page, "Orders prototype");
   await expect(page.getByTestId("import-preset-shadcn/ui")).toBeVisible();
   await shot("01-empty");
 

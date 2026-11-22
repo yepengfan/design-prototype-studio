@@ -9,7 +9,14 @@ const port = Number(process.env.STUDIO_E2E_PORT ?? 5275);
 export const dataDir = path.join(root, ".studio", "e2e");
 export const deliveryDir = path.join(dataDir, "deliveries");
 
+/**
+ * The flow only counts as complete when an agent answers, so the end-to-end run
+ * points at a real consumer of the briefing rather than a file on disk.
+ */
+export const reviewAgent = `node ${path.join(root, "tests", "fixtures", "review-agent.mjs")}`;
+
 export default defineConfig({
+  globalSetup: "./tests/e2e/global-setup.ts",
   testDir: "tests/e2e",
   timeout: 180_000,
   expect: { timeout: 20_000 },
@@ -35,6 +42,7 @@ export default defineConfig({
       PORT: String(port),
       STUDIO_DATA_DIR: dataDir,
       STUDIO_DELIVERY_DIR: deliveryDir,
+      STUDIO_AGENT_COMMAND: reviewAgent,
     },
   },
 });

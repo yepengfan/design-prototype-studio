@@ -23,6 +23,9 @@ export function PreviewPane({ projectId, page, mode, buildKey, onModeChange, onS
     post();
 
     const onMessage = (event: MessageEvent) => {
+      // The preview runs on an opaque origin, so its messages are the only
+      // thing it can reach us with. Accept them from this frame alone.
+      if (event.source !== frame.current?.contentWindow) return;
       const data = event.data as { type?: string; target?: AnnotationTarget } | undefined;
       if (data?.type === "studio:ready") return post();
       if (data?.type === "studio:select" && data.target) onSelect(data.target);
@@ -69,6 +72,11 @@ export function PreviewPane({ projectId, page, mode, buildKey, onModeChange, onS
             key={buildKey}
             title="Prototype preview"
             className="size-full"
+            // Imported design-system code is third-party. Withholding
+            // allow-same-origin puts it on an opaque origin, so it cannot read
+            // this document or call the Studio API; postMessage stays as the
+            // one channel it has, carrying only mode and selection.
+            sandbox="allow-scripts"
             src={`/preview/${projectId}/index.html?build=${encodeURIComponent(buildKey)}`}
             data-testid="preview-frame"
           />

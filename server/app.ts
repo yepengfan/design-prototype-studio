@@ -30,6 +30,22 @@ function param(request: Request, name: string): string {
   return value;
 }
 
+/**
+ * The preview runs imported design-system code on an opaque origin, which the
+ * browser labels `null`. Refusing any browser-supplied origin that is not this
+ * server's own keeps that code off the project API even if it tries to fetch.
+ * Non-browser callers send no Origin and are unaffected.
+ */
+const rejectForeignOrigin: RequestHandler = (request, _response, next) => {
+  const origin = request.get("origin");
+  if (!origin) return next();
+
+  const host = request.get("host");
+  if (host && (origin === `http://${host}` || origin === `https://${host}`)) return next();
+
+  next(new StudioError("The Studio API only answers its own pages.", 403));
+};
+
 /** Wraps an async handler so rejections reach the error middleware. */
 const route =
   (handler: RequestHandler): RequestHandler =>
@@ -45,6 +61,7 @@ export type AppOptions = {
 export async function createApp(options: AppOptions = {}) {
   const app = express();
   app.use(express.json({ limit: "2mb" }));
+  app.use("/api", rejectForeignOrigin);
 
   app.get("/api/presets", (_request, response) => {
     response.json({ presets, defaultGherkin });

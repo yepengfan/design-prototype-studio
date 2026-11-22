@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Project } from "../server/contracts.js";
@@ -22,7 +23,7 @@ let origin: string;
 beforeAll(async () => {
   config.dataDir = await fs.mkdtemp(path.resolve(".studio-review-"));
   config.deliveryDir = undefined;
-  config.agentCommand = undefined;
+  config.agentCommand = `node ${fileURLToPath(new URL("./fixtures/review-agent.mjs", import.meta.url))}`;
   const app = await createApp();
   server = app.listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
@@ -45,7 +46,7 @@ async function call(route: string, method = "GET", body?: unknown): Promise<{ pr
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   expect(response.ok).toBe(true);
-  return response.json();
+  return (await response.json()) as { project: Project };
 }
 
 describe("review regressions through project interfaces", () => {
@@ -113,8 +114,10 @@ describe("review regressions through project interfaces", () => {
     expect((await call(base)).project.annotations).toEqual([]);
     expect((await call(base)).project.batches).toHaveLength(1);
     const delivery = sent.batches[0]!.delivery;
-    expect(delivery).toMatchObject({ transport: "file", receipt: "1 note written for an agent to pick up." });
-    expect(await fs.readFile(delivery.target, "utf8")).toContain("Page: Orders (src/app/page.tsx)");
+    expect(delivery).toMatchObject({ transport: "command", receipt: "1 note received by the review agent." });
+    expect(delivery.reply).toContain("note(s) understood");
+    const briefing = path.join(config.dataDir, "deliveries", `${sent.batches[0]!.id}.md`);
+    expect(await fs.readFile(briefing, "utf8")).toContain("Page: Orders (src/app/page.tsx)");
     expect(sent.annotations[0]!.batchId).toBe(sent.batches[0]!.id);
   });
 });

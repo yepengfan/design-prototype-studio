@@ -8,11 +8,12 @@ import { StudioError } from "./errors.js";
 export type DeliveryResult = AnnotationBatch["delivery"];
 
 /**
- * Hands a batch of annotations to a review agent.
+ * Hands a batch of annotations to a review agent and returns only once that
+ * agent has answered.
  *
- * Two transports are supported, and both leave the batch on disk so a review is
- * auditable after the fact. `command` runs a configured agent CLI with the
- * briefing on stdin and keeps its answer; `file` writes a briefing for pickup.
+ * The briefing is written to disk first so the request is auditable, but a file
+ * on disk is not a delivery: without a configured agent this throws, which
+ * leaves the notes queued for another attempt.
  */
 export async function deliverBatch(
   project: Project,
@@ -34,18 +35,17 @@ export async function deliverBatch(
   );
 
   if (!config.agentCommand)
-    return {
-      transport: "file",
-      target: briefingFile,
-      receipt: `${annotations.length} note${annotations.length === 1 ? "" : "s"} written for an agent to pick up.`,
-    };
+    throw new StudioError(
+      `No review agent is configured, so these notes cannot be sent. The briefing is ready at ${briefingFile}; set STUDIO_AGENT_COMMAND to the agent that should receive it and send again.`,
+      503,
+    );
 
   const reply = await runAgent(config.agentCommand, briefing);
   await fs.writeFile(path.join(directory, `${batchId}.reply.md`), reply);
   return {
     transport: "command",
     target: config.agentCommand,
-    receipt: `${annotations.length} note${annotations.length === 1 ? "" : "s"} sent to the review agent.`,
+    receipt: `${annotations.length} note${annotations.length === 1 ? "" : "s"} received by the review agent.`,
     reply,
   };
 }

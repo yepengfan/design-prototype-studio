@@ -29,10 +29,10 @@ function plan(gherkin: string, components = catalog) {
 describe("planPage", () => {
   it.each(['I click "Delete order"', 'I click "Delete overdue order"', "I click Delete order"])("reports unsupported action %s against its step", (step) => {
     const result = plan(`${ordersGherkin}    When ${step}\n`);
-    expect(result.gaps).toEqual([expect.objectContaining({
-      capability: "button", requirement: step,
-      reason: expect.stringContaining("unsupported interaction"),
-    })]);
+    expect(result.gaps).toHaveLength(1);
+    expect(result.gaps[0]!.capability).toBe("button");
+    expect(result.gaps[0]!.requirement).toBe(step);
+    expect(result.gaps[0]!.reason).toContain("unsupported interaction");
     expect(result.blocks.filter((block) => block.type === "filter-toggle")).toHaveLength(1);
   });
 

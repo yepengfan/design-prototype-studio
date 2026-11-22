@@ -100,11 +100,10 @@ export function NotesPanel({
         {lastBatch && (
           <div className="grid gap-1 rounded-md border p-3" data-testid="delivery-receipt">
             <span className="flex flex-wrap items-center gap-2 text-sm font-medium">
-              {lastBatch.delivery.transport === "command" ? "Delivered" : "Written for agent pickup"}
+              Delivered
               <Badge variant="secondary">{lastBatch.delivery.transport}</Badge>
             </span>
             <span className="text-muted-foreground text-xs">{lastBatch.delivery.receipt}</span>
-            <span className="text-muted-foreground text-xs break-all">{lastBatch.delivery.target}</span>
             {lastBatch.delivery.reply && (
               <p className="bg-muted mt-1 rounded p-2 text-xs whitespace-pre-wrap">
                 {lastBatch.delivery.reply}

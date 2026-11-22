@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { expect, test, type FrameLocator, type Page } from "@playwright/test";
 import { deliveryDir } from "../../playwright.config.js";
+import { openFreshStudio } from "./fresh-studio.js";
 
 /**
  * The pilot use case, with one step the shadcn/ui registry cannot fill, so the
@@ -27,8 +28,7 @@ function preview(page: Page): FrameLocator {
 
 test.describe("the designer flow", () => {
   test("imports a design system, generates from Gherkin, reviews and sends feedback", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.getByRole("heading", { name: "Design Prototype Studio" })).toBeVisible();
+    await openFreshStudio(page, "Orders prototype");
 
     await test.step("import the shadcn/ui registry", async () => {
       await page.getByTestId("import-preset-shadcn/ui").click();
@@ -114,22 +114,61 @@ test.describe("the designer flow", () => {
       await expect(frame.locator('[data-studio-row="A-102"]')).toBeVisible();
     });
 
-    await test.step("write the batch for agent pickup", async () => {
+    let batchId = "";
+    await test.step("send the batch and get the review agent's own answer back", async () => {
       await page.getByTestId("send-notes").click();
       const receipt = page.getByTestId("delivery-receipt");
-      await expect(receipt).toContainText("Written for agent pickup");
-      await expect(receipt).toContainText("1 note written for an agent to pick up.");
+      await expect(receipt).toContainText("Delivered");
+      await expect(receipt).toContainText("1 note received by the review agent.");
+      // The agent's reply is what proves it received the batch.
+      await expect(receipt).toContainText("note(s) understood");
+
+      const reply = (await receipt.textContent()) ?? "";
+      batchId = /Reviewed batch (\S+?):/.exec(reply)?.[1] ?? "";
+      expect(batchId).not.toBe("");
     });
 
-    await test.step("the pickup briefing contains the page, anchor and note", async () => {
-      const files = await fs.readdir(deliveryDir);
-      const briefingName = files.find((name) => name.endsWith(".md") && !name.endsWith(".reply.md"));
-      expect(briefingName).toBeDefined();
-      const briefing = await fs.readFile(path.join(deliveryDir, briefingName!), "utf8");
+    await test.step("the briefing the agent read contains the page, anchor and note", async () => {
+      // Other specs deliver into the same directory, so read this batch's own.
+      const briefingName = `${batchId}.md`;
+      expect(await fs.readdir(deliveryDir)).toContain(briefingName);
+      const briefing = await fs.readFile(path.join(deliveryDir, briefingName), "utf8");
       expect(briefing).toContain("Call this control Overdue only");
       expect(briefing).toContain("Anchor: control-show-overdue");
       expect(briefing).toContain("Page: Orders (src/app/page.tsx)");
       expect(briefing).toContain("Feature: Review overdue orders");
+    });
+
+    await test.step("the preview cannot reach the Studio or its API", async () => {
+      // Imported design-system code runs on an opaque origin, so the parent
+      // document is unreadable and the API refuses it.
+      const frame = page.locator('[data-testid="preview-frame"]');
+      await expect(frame).toHaveAttribute("sandbox", "allow-scripts");
+
+      const reach = await preview(page)
+        .locator("body")
+        .evaluate(async () => {
+          let parent = "blocked";
+          try {
+            parent = window.parent.document.title ? "readable" : "readable";
+          } catch {
+            parent = "blocked";
+          }
+
+          let api = "blocked";
+          try {
+            const response = await fetch("/api/projects");
+            api = response.ok ? "readable" : `refused ${response.status}`;
+          } catch {
+            api = "blocked";
+          }
+
+          return { parent, api, origin: window.origin };
+        });
+
+      expect(reach.origin).toBe("null");
+      expect(reach.parent).toBe("blocked");
+      expect(reach.api).not.toBe("readable");
     });
   });
 });
