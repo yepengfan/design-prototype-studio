@@ -138,6 +138,7 @@ export async function generate(
     });
 
     const files: ResolvedFile[] = [resolved.shell, ...resolved.files];
+    const themeItems = [...resolved.items];
     const packages = new Set([...resolved.packages, "react", "react-dom", "clsx", "tailwind-merge"]);
     const needed = plan.blocks.flatMap((block) => block.componentIds);
     for (const system of project.systems) {
@@ -148,10 +149,11 @@ export async function generate(
       if (names.length === 0) continue;
       const closure = await resolveClosure(system.spec, names);
       files.push(...closure.files);
+      themeItems.push(...closure.items);
       for (const packageName of closure.packages) packages.add(packageName);
     }
 
-    const theme = await resolveTheme(templateSystem.spec);
+    const theme = await resolveTheme(templateSystem.spec, themeItems);
     for (const packageName of theme.packages) packages.add(packageName);
     const pagePath = "src/app/page.tsx";
     files.push({ path: pagePath, content: generated.source });

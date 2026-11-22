@@ -124,6 +124,8 @@ export function readDeclarations(
       provenance: `${origin.package}@${origin.version} ${path.basename(fileName)}`,
     });
   }
+  const exports = components.map((component) => component.name);
+  for (const component of components) component.exports = exports;
   if (components.length === 0)
     warnings.push(`${origin.package}: no public React component exports were found in ${path.basename(fileName)}.`);
   return components;

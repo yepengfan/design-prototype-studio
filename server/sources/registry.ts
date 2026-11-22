@@ -115,10 +115,11 @@ export async function importRegistry(
 export async function resolveClosure(
   spec: RegistrySourceSpec,
   names: string[],
-): Promise<{ files: ResolvedFile[]; packages: string[] }> {
+): Promise<{ files: ResolvedFile[]; packages: string[]; items: RegistryItem[] }> {
   const files = new Map<string, ResolvedFile>();
   const packages = new Set<string>();
   const visited = new Set<string>();
+  const items: RegistryItem[] = [];
   const aliases = spec.aliases ?? {};
   const queue = [...names];
 
@@ -128,6 +129,7 @@ export async function resolveClosure(
     visited.add(name);
 
     const item = await fetchItem(spec, name);
+    items.push(item);
     for (const dependency of item.dependencies ?? [])
       if (!(dependency in aliases)) packages.add(stripVersionRange(dependency));
     for (const dependency of item.registryDependencies ?? []) queue.push(dependency);
@@ -145,14 +147,14 @@ export async function resolveClosure(
     }
   }
 
-  return { files: [...files.values()], packages: [...packages] };
+  return { files: [...files.values()], packages: [...packages], items };
 }
 
 /** The layout shell derived from a template block, with its own file closure. */
 export async function resolveTemplate(
   spec: RegistrySourceSpec,
   name: string,
-): Promise<{ shell: ResolvedFile; files: ResolvedFile[]; packages: string[]; regions: string[] }> {
+): Promise<{ shell: ResolvedFile; files: ResolvedFile[]; packages: string[]; regions: string[]; items: RegistryItem[] }> {
   const item = await fetchItem(spec, name);
   const page = pageFile(item);
   const layout = extractLayout(page.content!);
@@ -198,16 +200,8 @@ export async function resolveTemplate(
     files: [...files.values()],
     packages: [...packages],
     regions: layout.regions,
+    items: [item, ...closure.items],
   };
-}
-
-/** Import path of the shell module a template resolves to. */
-export function templateShellImportPath(pagePath: string): string {
-  return projectImportPath(pagePath).replace(/[^/]+$/, "template-shell");
-}
-
-export async function templatePagePath(spec: RegistrySourceSpec, name: string): Promise<string> {
-  return pageFile(await fetchItem(spec, name)).path;
 }
 
 function pageFile(item: RegistryItem) {

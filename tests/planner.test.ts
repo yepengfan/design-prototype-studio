@@ -141,9 +141,9 @@ describe("planPage", () => {
     expect(filter?.options).toEqual(["Overdue", "Paid"]);
   });
 
-  it("refuses a scenario that describes no page content", () => {
-    expect(() => plan("Feature: F\n  Scenario: S\n    Given a user exists\n")).toThrow(
-      /does not describe any page content/,
-    );
+  it("reports unsupported preconditions as named gaps", () => {
+    expect(plan("Feature: F\n  Scenario: S\n    Given a user exists\n").gaps).toEqual([
+      expect.objectContaining({ requirement: "a user exists" }),
+    ]);
   });
 });

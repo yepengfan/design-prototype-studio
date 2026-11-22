@@ -41,19 +41,29 @@ export async function buildPreview(projectId: string, build: PreviewBuild): Prom
   await writeFile(root, "src/preview/bridge.ts", await readRuntime("bridge.ts"));
   await writeFile(root, "src/preview/main.tsx", mainSource(build.entryModule));
   await writeFile(root, "src/styles.css", `${build.styles}\n@source "./";\n${annotationStyles}`);
-  await writeFile(root, "dist/index.html", indexHtml);
-
-  await bundle(root);
-  await compileStyles(root);
+  const output = await fs.mkdtemp(path.join(root, "preview-build-"));
+  try {
+    await bundle(root, output);
+    await compileStyles(root, output);
+    const dist = paths.projectDist(projectId);
+    await fs.mkdir(dist, { recursive: true });
+    const version = path.basename(output);
+    await fs.rename(output, path.join(dist, version));
+    const pendingIndex = path.join(root, "preview-index.html");
+    await fs.writeFile(pendingIndex, indexHtml.replaceAll("./preview.", `./${version}/preview.`));
+    await fs.rename(pendingIndex, path.join(dist, "index.html"));
+  } finally {
+    await fs.rm(output, { recursive: true, force: true });
+  }
 }
 
-async function bundle(root: string): Promise<void> {
+async function bundle(root: string, output: string): Promise<void> {
   const src = path.join(root, "src");
   try {
     await esbuild.build({
       absWorkingDir: root,
       entryPoints: [path.join(src, "preview", "main.tsx")],
-      outfile: path.join(root, "dist", "preview.js"),
+      outfile: path.join(output, "preview.js"),
       bundle: true,
       format: "iife",
       platform: "browser",
@@ -83,10 +93,10 @@ function reactAliases(): Record<string, string> {
   return { react: path.join(modules, "react"), "react-dom": path.join(modules, "react-dom") };
 }
 
-async function compileStyles(root: string): Promise<void> {
+async function compileStyles(root: string, output: string): Promise<void> {
   const binary = path.join(config.repoRoot, "node_modules", ".bin", "tailwindcss");
   try {
-    await run(binary, ["-i", path.join(root, "src", "styles.css"), "-o", path.join(root, "dist", "preview.css")], {
+    await run(binary, ["-i", path.join(root, "src", "styles.css"), "-o", path.join(output, "preview.css")], {
       cwd: root,
       timeout: 120_000,
     });

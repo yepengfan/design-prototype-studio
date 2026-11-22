@@ -29,7 +29,10 @@ export function parseGherkin(text: string): GherkinFeature {
       continue;
     }
 
-    const scenario_ = /^(?:Scenario|Example|Scenario Outline):\s*(.*)$/.exec(line);
+    if (/^Scenario Outline:/.test(line))
+      throw new StudioError("Scenario Outline is not supported. Supply a concrete Scenario with mock rows.", 422);
+
+    const scenario_ = /^(?:Scenario|Example):\s*(.*)$/.exec(line);
     if (scenario_) {
       scenario = { name: scenario_[1]!.trim(), steps: [] };
       scenarios.push(scenario);

@@ -66,6 +66,34 @@ export function planPage(scenario: GherkinScenario, components: CatalogComponent
     });
   }
 
+  if (!blocks.some((block) => block.type === "data-table")) {
+    for (let index = blocks.length - 1; index >= 0; index--) {
+      const block = blocks[index]!;
+      if (block.type === "heading") continue;
+      gaps.push({
+        capability: block.capability,
+        requirement: block.requirement,
+        reason: "This requirement needs the orders table, which could not be resolved from the selected systems.",
+        suggestion: "Resolve the table gap or reword this step.",
+      });
+      blocks.splice(index, 1);
+    }
+  }
+  const table = blocks.find((block) => block.type === "data-table");
+  const retained = blocks.map((block) => ({ block, needs: [] }));
+  for (const step of scenario.steps.filter((step) => step.keyword === "Then")) {
+    if (blocks.some((block) => block.requirement === step.text) || gaps.some((gap) => gap.requirement === step.text)) continue;
+    if (!supportedRowOutcome(step, table?.dataset, retained)) {
+      const requirement = unhandled(step);
+      gaps.push({
+        capability: requirement.block.capability,
+        requirement: step.text,
+        reason: requirement.unsupported!,
+        suggestion: "Resolve the missing blocks or reword this outcome.",
+      });
+    }
+  }
+
   if (!blocks.some((block) => block.type !== "heading") && gaps.length === 0)
     throw new StudioError(
       "This scenario does not describe any page content yet. Add a data table, a control to use, or an outcome to see.",
@@ -125,12 +153,16 @@ function readRequirements(scenario: GherkinScenario): Requirement[] {
   }
 
   for (const step of scenario.steps) {
+    if (step.keyword === "Given") {
+      if (step !== dataset?.step) requirements.push(unhandled(step));
+      continue;
+    }
     if (step.keyword !== "When") continue;
     const values = quotedValues(step.text);
 
-    const typed = /\b(?:type|enter|search for)\b/i.test(step.text);
-    const selected = /\bselect\b.+\bfrom\b/i.test(step.text);
-    const pressed = /\b(?:choose|click|press|toggle|tap)\b/i.test(step.text);
+    const typed = /^I (?:(?:type|enter) "[^"]+" (?:into|in) "[^"]+"|search for "[^"]+")$/i.test(step.text);
+    const selected = /^I select "[^"]+" from "[^"]+"$/i.test(step.text);
+    const pressed = /^I (?:choose|click|press|toggle|tap) "[^"]+"$/i.test(step.text);
 
     if (/^I open the .+ (?:page|screen|view)$/i.test(step.text)) continue;
 
@@ -174,7 +206,7 @@ function readRequirements(scenario: GherkinScenario): Requirement[] {
     }
 
     if (pressed) {
-      const label = values[0] ?? step.text;
+      const label = values[0]!;
       const column = dataset?.dataset.statusColumn;
       const value = column && dataset ? matchValue(label, dataset.dataset, column) : undefined;
       const hides = outcomes.some((outcome) => /\b(hidden|not (?:shown|visible)|disappears)\b/i.test(outcome.text));
@@ -185,7 +217,7 @@ function readRequirements(scenario: GherkinScenario): Requirement[] {
           capability: "button",
           requirement: step.text,
           label,
-          alternateLabel: alternateLabel(label),
+          alternateLabel: "Show all",
           column,
           value,
         },
@@ -206,12 +238,12 @@ function readRequirements(scenario: GherkinScenario): Requirement[] {
           type: "summary",
           capability: "card",
           requirement: step.text,
-          label: summaryLabel(step.text),
+          label: quotedValues(step.text)[0] ?? "Summary",
           dataset: dataset?.dataset,
           column: dataset?.dataset.statusColumn ?? dataset?.dataset.columns[0],
         },
         needs: ["card"],
-        unsupported: dataset && /^row count$/i.test(summaryLabel(step.text))
+        unsupported: dataset && /^I see a "Row count" summary$/i.test(step.text)
           ? undefined
           : "This metric has unsupported aggregation semantics. Only an explicit Row count summary is supported.",
       });
@@ -264,7 +296,7 @@ function supportedRowOutcome(step: GherkinStep, dataset: Dataset | undefined, re
 }
 
 function readDataset(steps: GherkinStep[]): { step: GherkinStep; dataset: Dataset } | undefined {
-  const step = steps.find((candidate) => candidate.table && candidate.table.rows.length > 0);
+  const step = steps.find((candidate) => candidate.keyword === "Given" && /^the following mock orders exist$/i.test(candidate.text) && candidate.table && candidate.table.rows.length > 0);
   if (!step?.table) return undefined;
   const { columns, rows } = step.table;
   const records = rows.map((row) =>
@@ -302,18 +334,6 @@ function matchValue(label: string, dataset: Dataset, column: string): string | u
 
 function distinct(dataset: Dataset, column: string): string[] {
   return [...new Set(dataset.rows.map((row) => row[column] ?? "").filter(Boolean))];
-}
-
-function alternateLabel(label: string): string {
-  const match = /^show\s+(.+)$/i.exec(label);
-  return match ? "Show all" : `Clear ${label.toLowerCase()}`;
-}
-
-function summaryLabel(text: string): string {
-  const quoted = quotedValues(text)[0];
-  if (quoted) return quoted;
-  const match = /\b(?:see|shows?)\s+(?:a|the)\s+(.+?)(?:\s+of\b|$)/i.exec(text);
-  return capitalise(match?.[1] ?? "Summary");
 }
 
 function pageTitle(scenario: GherkinScenario): string {
