@@ -46,10 +46,10 @@ export async function ensurePackages(
       "npm",
       [
         "install",
-        ...missing,
+        ...wanted,
         "--prefix",
         projectDir,
-        "--no-save",
+        "--save",
         "--ignore-scripts",
         "--no-audit",
         "--no-fund",

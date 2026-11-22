@@ -22,7 +22,7 @@ export const config = {
     : undefined,
   /**
    * Shell command that receives an annotation batch on stdin and answers on
-   * stdout, for example `cursor-agent -p`. Falls back to file delivery.
+   * stdout, for example `cursor-agent -p`.
    */
   agentCommand: process.env.STUDIO_AGENT_COMMAND,
   agentCommandTimeoutMs: Number(process.env.STUDIO_AGENT_TIMEOUT_MS ?? 120_000),

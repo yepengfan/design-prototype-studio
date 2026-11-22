@@ -35,39 +35,41 @@ export async function importDesignSystem(
   spec: SourceSpec,
 ): Promise<{ project: Project; system: DesignSystem }> {
   const id = `${slug(name)}-${randomUUID().slice(0, 8)}`;
-  let system: DesignSystem;
+  let system!: DesignSystem;
 
-  if (spec.kind === "registry") {
-    const imported = await importRegistry(id, name, spec);
-    system = {
-      id,
-      name,
-      spec,
-      origin: spec.url,
-      importedAt: new Date().toISOString(),
-      components: imported.components,
-      templates: imported.templates,
-      warnings: imported.warnings,
-    };
-  } else {
-    const imported = await importNpmPackage(id, name, spec, paths.project(projectId));
-    system = {
-      id,
-      name,
-      spec: { ...spec, version: imported.version },
-      origin: `${spec.package}@${imported.version}`,
-      importedAt: new Date().toISOString(),
-      components: imported.components,
-      templates: [],
-      warnings: imported.warnings,
-    };
-  }
+  const project = await updateProject(projectId, async (current) => {
+    if (spec.kind === "registry") {
+      const imported = await importRegistry(id, name, spec);
+      system = {
+        id,
+        name,
+        spec,
+        origin: spec.url,
+        importedAt: new Date().toISOString(),
+        components: imported.components,
+        templates: imported.templates,
+        warnings: imported.warnings,
+      };
+    } else {
+      const imported = await importNpmPackage(id, name, spec, paths.project(projectId));
+      system = {
+        id,
+        name,
+        spec: { ...spec, version: imported.version },
+        origin: `${spec.package}@${imported.version}`,
+        importedAt: new Date().toISOString(),
+        components: imported.components,
+        templates: [],
+        warnings: imported.warnings,
+      };
+    }
 
-  const project = await updateProject(projectId, (current) => ({
-    ...current,
-    systems: [...current.systems.filter((entry) => entry.name !== name), system],
-    selectedSystemIds: [...new Set([...current.selectedSystemIds, system.id])],
-  }));
+    return {
+      ...current,
+      systems: [...current.systems.filter((entry) => entry.name !== name), system],
+      selectedSystemIds: [...new Set([...current.selectedSystemIds, system.id])],
+    };
+  });
 
   return { project, system };
 }
@@ -162,7 +164,7 @@ export async function generate(
     });
 
     page = {
-      id: project.pages.find((previous) => previous.title === plan.title)?.id ?? randomUUID(),
+      id: project.pages[0]?.id ?? randomUUID(),
       title: plan.title,
       plan,
       templateId,
@@ -176,9 +178,6 @@ export async function generate(
       gherkin,
       selectedTemplateId: templateId,
       pages: [page],
-      annotations: project.annotations.filter((annotation) =>
-        annotation.pageId === page.id,
-      ),
     };
   });
 

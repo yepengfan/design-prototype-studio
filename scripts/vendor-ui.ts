@@ -20,7 +20,6 @@ const wanted = [
   "input",
   "label",
   "scroll-area",
-  "select",
   "separator",
   "textarea",
 ];

@@ -48,6 +48,15 @@ export function generatePage(input: GenerationInput): GeneratedSource {
     (block) => block.type === "filter-toggle" || block.type === "text-filter" || block.type === "select-filter",
   );
 
+  for (const filter of filters) {
+    if (!dataset || !filter.column || !dataset.columns.includes(filter.column) ||
+      (filter.type !== "text-filter" && (!filter.value || !dataset.rows.some((row) => row[filter.column!] === filter.value))) ||
+      (filter.type === "select-filter" && (!filter.options?.length ||
+        !filter.options.includes(filter.value!) ||
+        filter.options.some((option) => !option || !dataset.rows.some((row) => row[filter.column!] === option)))))
+      throw new StudioError(`The filter for "${filter.requirement}" cannot be resolved against the page's rows.`, 422);
+  }
+
   const body: string[] = [];
   const state: string[] = [];
 
@@ -88,7 +97,7 @@ export function generatePage(input: GenerationInput): GeneratedSource {
     }
   }
 
-  const filtersRows = Boolean(dataset) && filters.some((filter) => usesColumn(filter, dataset));
+  const filtersRows = filters.length > 0;
   const hooks = [...(filtersRows ? ["useMemo"] : []), ...(state.length ? ["useState"] : [])];
 
   const header = [
@@ -105,7 +114,7 @@ export function generatePage(input: GenerationInput): GeneratedSource {
     dataset ? renderRows(dataset) : "",
     `export default function GeneratedPage() {`,
     ...state,
-    dataset ? renderVisibleRows(dataset, filters) : "",
+    dataset ? renderVisibleRows(filters) : "",
     `  return (`,
     `    <${shellExport}>`,
     `      <div className="flex flex-col gap-6 px-4 py-6 lg:px-6" data-studio-page="${escapeAttribute(plan.title)}">`,
@@ -126,16 +135,9 @@ function renderRows(dataset: Dataset): string {
   return `const rows = ${JSON.stringify(dataset.rows, null, 2)} as const\n`;
 }
 
-/** Whether a filter block actually narrows a column the dataset publishes. */
-function usesColumn(filter: PlanBlock, dataset: Dataset | undefined): boolean {
-  if (!dataset || !filter.column || !dataset.columns.includes(filter.column)) return false;
-  return filter.type !== "filter-toggle" || Boolean(filter.value);
-}
-
-function renderVisibleRows(dataset: Dataset, filters: PlanBlock[]): string {
+function renderVisibleRows(filters: PlanBlock[]): string {
   const conditions = filters.flatMap((filter) => {
-    const column = filter.column;
-    if (!usesColumn(filter, dataset) || !column) return [];
+    const column = filter.column!;
     if (filter.type === "filter-toggle" && filter.value)
       return [`(!${stateName(filter)} || row[${JSON.stringify(column)}] === ${JSON.stringify(filter.value)})`];
     if (filter.type === "text-filter")
@@ -143,10 +145,10 @@ function renderVisibleRows(dataset: Dataset, filters: PlanBlock[]): string {
         `row[${JSON.stringify(column)}].toLowerCase().includes(${stateName(filter)}.toLowerCase())`,
       ];
     if (filter.type === "select-filter")
-      return [`(${stateName(filter)} === "all" || row[${JSON.stringify(column)}] === ${stateName(filter)})`];
+      return [`(${stateName(filter)} === "all" || row[${JSON.stringify(column)}] === ${JSON.stringify(filter.options)}[Number(${stateName(filter)})])`];
     return [];
   });
-  const dependencies = filters.filter((filter) => usesColumn(filter, dataset)).map(stateName);
+  const dependencies = filters.map(stateName);
   if (conditions.length === 0) return `  const visibleRows = rows`;
   return [
     `  const visibleRows = useMemo(`,
@@ -204,7 +206,7 @@ function renderSelectFilter(block: PlanBlock): string {
     `    </SelectTrigger>`,
     `    <SelectContent>`,
     `      <SelectItem value="all">All</SelectItem>`,
-    ...options.map((option) => `      <SelectItem value=${JSON.stringify(option)}>${escapeText(option)}</SelectItem>`),
+    ...options.map((option, index) => `      <SelectItem value=${JSON.stringify(String(index))}>${escapeText(option)}</SelectItem>`),
     `    </SelectContent>`,
     `  </Select>`,
     `</div>`,
@@ -228,7 +230,7 @@ function renderTable(block: PlanBlock, filters: PlanBlock[], withBadge: boolean)
   const dataset = block.dataset;
   if (!dataset) throw new StudioError("A table block needs the rows its scenario listed.");
   const statusColumn = dataset.statusColumn;
-  const source = filters.some((filter) => usesColumn(filter, dataset)) ? "visibleRows" : "rows";
+  const source = filters.length > 0 ? "visibleRows" : "rows";
 
   // A status the scenario filters on is the one it cares about, so it is the
   // value the badge emphasises. Without such a filter every status reads alike.

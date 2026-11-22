@@ -132,7 +132,10 @@ function readRequirements(scenario: GherkinScenario): Requirement[] {
     const selected = /\bselect\b.+\bfrom\b/i.test(step.text);
     const pressed = /\b(?:choose|click|press|toggle|tap)\b/i.test(step.text);
 
+    if (/^I open the .+ (?:page|screen|view)$/i.test(step.text)) continue;
+
     if (typed && values[0]) {
+      const column = values[1] ? matchColumn(values[1], dataset?.dataset) : dataset?.dataset.columns[0];
       requirements.push({
         block: {
           anchor: anchorFor("filter-text", values[0]),
@@ -140,16 +143,18 @@ function readRequirements(scenario: GherkinScenario): Requirement[] {
           capability: "input",
           requirement: step.text,
           label: values[1] ?? `Search ${dataset?.dataset.columns[0] ?? "rows"}`,
-          column: matchColumn(values[1], dataset?.dataset) ?? dataset?.dataset.columns[0],
+          column,
           value: values[0],
         },
         needs: ["input"],
+        unsupported: dataset && column ? undefined : "A text filter needs mock rows and a matching column.",
       });
       continue;
     }
 
     if (selected && values[0]) {
-      const column = matchColumn(values[1], dataset?.dataset) ?? dataset?.dataset.statusColumn;
+      const column = values[1] ? matchColumn(values[1], dataset?.dataset) : undefined;
+      const options = column && dataset ? distinct(dataset.dataset, column) : [];
       requirements.push({
         block: {
           anchor: anchorFor("filter-select", values[1] ?? values[0]),
@@ -159,9 +164,11 @@ function readRequirements(scenario: GherkinScenario): Requirement[] {
           label: values[1] ?? "Filter",
           column,
           value: values[0],
-          options: column && dataset ? distinct(dataset.dataset, column) : undefined,
+          options,
         },
         needs: ["select"],
+        unsupported: dataset && column && options.includes(values[0])
+          ? undefined : "A select filter needs mock rows, a matching column and a value present in its options.",
       });
       continue;
     }
@@ -185,10 +192,13 @@ function readRequirements(scenario: GherkinScenario): Requirement[] {
         needs: ["button"],
         unsupported: hides && value && label.toLowerCase() === `show ${value}`.toLowerCase() ? undefined : `The action "${label}" has unsupported interaction semantics.`,
       });
+      continue;
     }
+    requirements.push(unhandled(step));
   }
 
   for (const step of outcomes) {
+    const before = requirements.length;
     if (/\b(summary|total|totals|metric|count)\b/i.test(step.text))
       requirements.push({
         block: {
@@ -218,9 +228,39 @@ function readRequirements(scenario: GherkinScenario): Requirement[] {
           },
           needs: [capability],
         });
+    if (requirements.length === before && !supportedRowOutcome(step, dataset?.dataset, requirements))
+      requirements.push(unhandled(step));
   }
 
   return requirements;
+}
+
+function unhandled(step: GherkinStep): Requirement {
+  return {
+    block: { anchor: anchorFor("unsupported", step.text), type: "summary", capability: "requirement", requirement: step.text },
+    needs: [],
+    unsupported: "This step cannot be fulfilled by the supported page interactions and outcomes.",
+  };
+}
+
+function supportedRowOutcome(step: GherkinStep, dataset: Dataset | undefined, requirements: Requirement[]): boolean {
+  if (!dataset) return false;
+  const shown = /^I see order "([^"]+)"(?: with an? "([^"]+)" badge)?$/i.exec(step.text);
+  const hidden = /^order "([^"]+)" is hidden$/i.exec(step.text);
+  if (!shown && !hidden) return false;
+  const identity = dataset.columns[0]!;
+  const row = dataset.rows.find((entry) => entry[identity] === (shown?.[1] ?? hidden?.[1]));
+  if (!row) return false;
+  const filters = requirements.filter((entry) => !entry.unsupported).map((entry) => entry.block)
+    .filter((block) => ["text-filter", "select-filter", "filter-toggle"].includes(block.type));
+  const visible = filters.every((filter) => {
+    const value = row[filter.column!] ?? "";
+    return filter.type === "text-filter"
+      ? value.toLowerCase().includes(filter.value!.toLowerCase())
+      : value === filter.value;
+  });
+  if (hidden) return !visible;
+  return visible && (!shown?.[2] || Boolean(dataset.statusColumn && row[dataset.statusColumn] === shown[2]));
 }
 
 function readDataset(steps: GherkinStep[]): { step: GherkinStep; dataset: Dataset } | undefined {

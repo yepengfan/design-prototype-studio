@@ -136,7 +136,7 @@ async function install(spec: NpmSourceSpec, projectDir: string): Promise<void> {
     `${spec.package}@${spec.version}`,
     "--prefix",
     projectDir,
-    "--no-save",
+    "--save",
     "--ignore-scripts",
     "--no-audit",
     "--no-fund",

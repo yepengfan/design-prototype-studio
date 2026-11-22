@@ -24,14 +24,15 @@ named gap rather than faked with a substitute component.
    it in an iframe.
 6. **Review.** *Interact* runs the prototype. *Annotate* turns clicks into
    anchored notes instead of actions.
-7. **Send.** Queued notes are written as a briefing for an agent to pick up.
-   With `STUDIO_AGENT_COMMAND` configured, the agent receives the briefing and
-   its reply is stored. Each briefing carries the scenario, template and anchors.
+7. **Send.** Queued notes are written as a briefing, then delivered through
+   `STUDIO_AGENT_COMMAND`. A batch counts as sent only after the agent answers.
+   Without a configured agent, or if delivery fails, the notes stay queued.
+   Each briefing carries the scenario, template and anchors.
 
 The Studio is a strictly local, single-user tool. The API binds to `127.0.0.1`.
-Imported registry and npm code runs as trusted code on the designer's machine.
-The preview shares the Studio origin and can access its parent document and all
-project APIs; import only sources you trust with that access.
+Imported registry and npm code runs in a sandboxed preview on an opaque origin.
+It cannot access the Studio document or project API. Mode and element selection
+pass through a narrow postMessage channel tied to the preview frame.
 
 ## Running it
 
@@ -57,7 +58,7 @@ npm run dev     # Studio on http://localhost:5173, API on 5174
 | `PORT` | `5174` | API port |
 | `STUDIO_DATA_DIR` | `.studio` | Projects, generated sources, registry cache |
 | `STUDIO_DELIVERY_DIR` | `<data>/deliveries` | Where note briefings are written |
-| `STUDIO_AGENT_COMMAND` | unset | When set, briefings are piped to this command instead of written to a file |
+| `STUDIO_AGENT_COMMAND` | unset | Required for sending: receives the briefing on stdin and must answer on stdout |
 | `STUDIO_REGISTRY_CACHE_SECONDS` | `86400` | How long a fetched registry payload stays valid on disk |
 
 `STUDIO_DATA_DIR` must stay inside the repository: generated projects resolve
