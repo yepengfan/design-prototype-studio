@@ -73,6 +73,40 @@ async function preview(id: string) {
 }
 
 describe("preview publication through the Studio API", () => {
+  it("preserves component styles beside the generated Tailwind utilities", async () => {
+    const id = "component-css";
+    await buildPreview(id, {
+      files: [
+        { path: "src/app/page.tsx", content: 'import "./button.css"; export default function Page() { return <button className="fixture-button flex">Styled</button> }' },
+        { path: "src/app/button.css", content: '.fixture-button { color: rgb(12, 34, 56); }' },
+      ], styles: '@import "tailwindcss";', entryModule: "@/app/page",
+    });
+    const built = await preview(id);
+    expect(built.css).toContain(".fixture-button");
+    const document = new JSDOM(`<style>${built.css}</style><button class="fixture-button flex">Styled</button>`).window;
+    expect(document.getComputedStyle(document.document.querySelector("button")!).color).toBe("rgb(12, 34, 56)");
+    const findFlex = (rules: CSSRuleList): CSSStyleRule | undefined => {
+      for (const rule of rules) {
+        if ("selectorText" in rule && rule.selectorText === ".flex") return rule as CSSStyleRule;
+        if ("cssRules" in rule) {
+          const found = findFlex((rule as CSSGroupingRule).cssRules);
+          if (found) return found;
+        }
+      }
+    };
+    expect(findFlex(document.document.styleSheets[0]!.cssRules)?.style.getPropertyValue("display")).toBe("flex");
+  });
+
+  it("refuses JavaScript compiler directives in nested imported stylesheets", async () => {
+    await expect(buildPreview("nested-styles", {
+      files: [
+        { path: "src/app/page.tsx", content: 'export default function Page() { return <p>Styles</p> }' },
+        { path: "src/nested.css", content: '@import "./settings.css";' },
+        { path: "src/settings.css", content: '@config "./unavailable-config.js";' },
+      ], styles: '@import "./nested.css";', entryModule: "@/app/page",
+    })).rejects.toThrow("JavaScript plugins and configuration are not allowed");
+  });
+
   it("builds a custom registry with no theme options", async () => {
     const { base, id, request } = await setup();
     await call(`${base}/generate`, "POST", request);
@@ -125,7 +159,7 @@ describe("preview publication through the Studio API", () => {
     const { project: regenerated } = await call(`${base}/generate`, "POST", renamed);
     expect(regenerated.pages[0]!.title).toBe("Renamed");
     expect(regenerated.pages[0]!.id).toBe(before.pages[0]!.id);
-    expect(regenerated.annotations).toEqual(before.annotations);
+    expect(regenerated.annotations).toEqual(before.annotations.map((annotation) => ({ ...annotation, priorGeneration: true })));
     expect(await preview(id)).not.toEqual(served);
     expect(await fs.readdir(paths.project(id))).not.toContain("preview-index.html");
   });

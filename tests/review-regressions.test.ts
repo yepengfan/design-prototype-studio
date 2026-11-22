@@ -50,6 +50,59 @@ async function call(route: string, method = "GET", body?: unknown): Promise<{ pr
 }
 
 describe("review regressions through project interfaces", () => {
+  it("reconciles selections atomically on re-import", async () => {
+    const { project: created } = await call("/api/projects", "POST", { name: "Re-import" });
+    const base = `/api/projects/${created.id}`;
+    const source = { name: "Fixture", spec: fixtureRegistry };
+    const { project: imported } = await call(`${base}/systems`, "POST", source);
+    const oldSystem = imported.systems[0]!;
+    await call(`${base}/template`, "PUT", { templateId: oldSystem.templates[0]!.id });
+    await call(`${base}/systems`, "POST", source);
+    const { project: reloaded } = await call(base);
+    expect(reloaded.selectedSystemIds).toEqual([reloaded.systems[0]!.id]);
+    expect(reloaded.selectedSystemIds).not.toContain(oldSystem.id);
+    expect(reloaded.selectedTemplateId).toBeUndefined();
+    await call(`${base}/systems/selection`, "PUT", { systemIds: [] });
+    await call(`${base}/systems/selection`, "PUT", { systemIds: reloaded.selectedSystemIds });
+    const templateId = reloaded.systems[0]!.templates[0]!.id;
+    await call(`${base}/template`, "PUT", { templateId });
+    const { project: generated } = await call(`${base}/generate`, "POST", { templateId, gherkin: ordersGherkin });
+    expect(generated.pages).toHaveLength(1);
+  });
+
+  it("keeps queued notes while identifying their anchors as belonging to a prior generation", async () => {
+    const { project: created } = await call("/api/projects", "POST", { name: "Changed interaction" });
+    const base = `/api/projects/${created.id}`;
+    const { project: imported } = await call(`${base}/systems`, "POST", { name: "Fixture", spec: fixtureRegistry });
+    const templateId = imported.systems[0]!.templates[0]!.id;
+    const { project: generated } = await call(`${base}/generate`, "POST", { templateId, gherkin: ordersGherkin });
+    await call(`${base}/annotations`, "POST", {
+      pageId: generated.pages[0]!.id, note: "Call this Overdue only",
+      target: { label: "Show overdue", domPath: "button", anchor: "control-show-overdue" },
+    });
+    const gherkin = ordersGherkin.replace('I choose "Show overdue"', 'I type "A-101" into "Order"');
+    await call(`${base}/generate`, "POST", { templateId, gherkin });
+    const { project: reloaded } = await call(base);
+    expect(reloaded.gherkin).toBe(gherkin);
+    expect(reloaded.annotations).toHaveLength(1);
+    expect(reloaded.annotations[0]!.batchId).toBeUndefined();
+    const { project: sent } = await call(`${base}/annotations/send`, "POST");
+    const briefing = await fs.readFile(path.join(config.dataDir, "deliveries", `${sent.batches[0]!.id}.md`), "utf8");
+    expect(briefing).toContain(gherkin.trim());
+    expect(briefing).toContain("Anchor (prior generation): control-show-overdue");
+    expect(briefing).toContain("Anchor and selector belong to a prior generation, not the current use case or template.");
+    expect(briefing).not.toContain("   - Anchor: control-show-overdue");
+    expect(briefing).not.toContain("Page: Orders (src/app/page.tsx)");
+    await call(`${base}/annotations`, "POST", {
+      pageId: reloaded.pages[0]!.id, note: "Current search",
+      target: { label: "Order", domPath: "input", anchor: "control-order" },
+    });
+    const { project: current } = await call(base);
+    const currentBriefing = deliveryModule.renderBriefing(current, "current", [current.annotations.at(-1)!]);
+    expect(currentBriefing).toContain("   - Anchor: control-order");
+    expect(currentBriefing).not.toContain("prior generation");
+  });
+
   it("serializes mutations and releases the queue after a failure", async () => {
     const project = await createProject("Concurrent updates");
     let release!: () => void;
@@ -145,7 +198,7 @@ describe("review regressions through project interfaces", () => {
     expect(delivery).toMatchObject({ transport: "command", receipt: "1 note received by the review agent." });
     expect(delivery.reply).toContain("note(s) understood");
     const briefing = path.join(config.dataDir, "deliveries", `${sent.batches[0]!.id}.md`);
-    expect(await fs.readFile(briefing, "utf8")).toContain("Page: Orders (src/app/page.tsx)");
+    expect(await fs.readFile(briefing, "utf8")).toContain("Anchor (prior generation): control-show-overdue");
     expect(sent.annotations[0]!.batchId).toBe(sent.batches[0]!.id);
   });
 });

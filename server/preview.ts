@@ -1,13 +1,12 @@
-import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { promisify } from "node:util";
+import { compile } from "tailwindcss";
+import { Scanner } from "@tailwindcss/oxide";
+import { create } from "enhanced-resolve";
 import * as esbuild from "esbuild";
 import { config, paths } from "./config.js";
 import { StudioError } from "./errors.js";
 import type { ResolvedFile } from "./sources/registry.js";
-
-const run = promisify(execFile);
 
 export type PreviewBuild = {
   files: ResolvedFile[];
@@ -44,7 +43,14 @@ export async function buildPreview(projectId: string, build: PreviewBuild): Prom
   const output = await fs.mkdtemp(path.join(root, "preview-build-"));
   try {
     await bundle(root, output);
-    await compileStyles(root, output);
+    await compileStyles(root, output, build.files);
+    let componentCss = "";
+    try {
+      componentCss = await fs.readFile(path.join(output, "preview.css"), "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await fs.appendFile(path.join(output, "preview.theme.css"), `\n${componentCss}`);
     const dist = paths.projectDist(projectId);
     await fs.mkdir(dist, { recursive: true });
     const version = path.basename(output);
@@ -93,17 +99,29 @@ function reactAliases(): Record<string, string> {
   return { react: path.join(modules, "react"), "react-dom": path.join(modules, "react-dom") };
 }
 
-async function compileStyles(root: string, output: string): Promise<void> {
-  const binary = path.join(config.repoRoot, "node_modules", ".bin", "tailwindcss");
+async function compileStyles(root: string, output: string, files: ResolvedFile[]): Promise<void> {
   try {
-    await run(binary, ["-i", path.join(root, "src", "styles.css"), "-o", path.join(output, "preview.css")], {
-      cwd: root,
-      timeout: 120_000,
+    const resolveCss = create.sync({
+      extensions: [".css"], mainFields: ["style"], conditionNames: ["style"],
+      modules: ["node_modules", path.join(config.repoRoot, "node_modules")],
     });
+    const compiler = await compile(await fs.readFile(path.join(root, "src/styles.css"), "utf8"), {
+      base: path.join(root, "src"),
+      loadModule: async () => { throw new Error("JavaScript plugins and configuration are not allowed in preview styles."); },
+      loadStylesheet: async (id, base) => {
+        const resolved = resolveCss(base, id);
+        if (!resolved) throw new Error(`Could not resolve stylesheet ${id}`);
+        return { path: resolved, base: path.dirname(resolved), content: await fs.readFile(resolved, "utf8") };
+      },
+    });
+    const scanner = new Scanner({});
+    const candidates = scanner.scanFiles(files.map((file) => ({
+      content: file.content, extension: path.extname(file.path).slice(1),
+    })));
+    await fs.writeFile(path.join(output, "preview.theme.css"), compiler.build(candidates));
   } catch (error) {
-    const stderr = (error as { stderr?: string }).stderr ?? "";
     throw new StudioError(
-      `The preview stylesheet could not be compiled. ${firstLine(stderr) || "Check the design system's base styles."}`,
+      `The preview stylesheet could not be compiled. ${error instanceof Error ? error.message : "Check the design system's base styles."}`,
       422,
     );
   }
@@ -156,7 +174,7 @@ const indexHtml = `<!doctype html>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" href="data:," />
     <title>Prototype preview</title>
-    <link rel="stylesheet" href="./preview.css" />
+    <link rel="stylesheet" href="./preview.theme.css" />
   </head>
   <body>
     <div id="root"></div>
@@ -165,6 +183,3 @@ const indexHtml = `<!doctype html>
 </html>
 `;
 
-function firstLine(value: string): string {
-  return value.split("\n").find((line) => line.trim())?.trim() ?? "";
-}

@@ -64,10 +64,16 @@ export async function importDesignSystem(
       };
     }
 
+    const replaced = current.systems.filter((entry) => entry.name === name);
+    const replacedIds = new Set(replaced.map((entry) => entry.id));
+    const replacedTemplate = replaced.some((entry) =>
+      entry.templates.some((template) => template.id === current.selectedTemplateId),
+    );
     return {
       ...current,
+      selectedTemplateId: replacedTemplate ? undefined : current.selectedTemplateId,
       systems: [...current.systems.filter((entry) => entry.name !== name), system],
-      selectedSystemIds: [...new Set([...current.selectedSystemIds, system.id])],
+      selectedSystemIds: [...new Set([...current.selectedSystemIds.filter((id) => !replacedIds.has(id)), system.id])],
     };
   });
 
@@ -180,6 +186,9 @@ export async function generate(
       gherkin,
       selectedTemplateId: templateId,
       pages: [page],
+      annotations: project.annotations.map((annotation) =>
+        annotation.pageId === page.id ? { ...annotation, priorGeneration: true } : annotation,
+      ),
     };
   });
 

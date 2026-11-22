@@ -235,7 +235,7 @@ function isPackageSpecifier(specifier: string): boolean {
   return !specifier.startsWith(".") && !specifier.startsWith("@/");
 }
 
-function packageNameOf(specifier: string): string {
+export function packageNameOf(specifier: string): string {
   const parts = specifier.split("/");
   return specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0]!;
 }

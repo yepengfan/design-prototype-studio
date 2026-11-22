@@ -1,3 +1,4 @@
+import { annotationTargetSchema } from "../../server/contracts";
 import { useEffect, useRef } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,9 +27,12 @@ export function PreviewPane({ projectId, page, mode, buildKey, onModeChange, onS
       // The preview runs on an opaque origin, so its messages are the only
       // thing it can reach us with. Accept them from this frame alone.
       if (event.source !== frame.current?.contentWindow) return;
-      const data = event.data as { type?: string; target?: AnnotationTarget } | undefined;
+      const data = event.data as { type?: string; target?: unknown } | undefined;
       if (data?.type === "studio:ready") return post();
-      if (data?.type === "studio:select" && data.target) onSelect(data.target);
+      if (data?.type === "studio:select") {
+        const target = annotationTargetSchema.safeParse(data.target);
+        if (target.success) onSelect(target.data);
+      }
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);

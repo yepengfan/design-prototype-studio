@@ -69,12 +69,6 @@ export const api = {
       body: JSON.stringify({ templateId }),
     }),
 
-  saveGherkin: (id: string, gherkin: string) =>
-    request<{ project: Project }>(`/api/projects/${id}/gherkin`, {
-      method: "PUT",
-      body: JSON.stringify({ gherkin }),
-    }),
-
   generate: (id: string, gherkin: string, templateId: string) =>
     request<{ project: Project; page: GeneratedPage }>(`/api/projects/${id}/generate`, {
       method: "POST",

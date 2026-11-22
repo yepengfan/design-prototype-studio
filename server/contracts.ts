@@ -206,6 +206,7 @@ export const annotationSchema = z.object({
   id: z.string(),
   pageId: z.string(),
   pageTitle: z.string(),
+  priorGeneration: z.boolean().optional(),
   target: annotationTargetSchema,
   note: z.string(),
   createdAt: z.string(),
@@ -252,7 +253,6 @@ export type Project = z.infer<typeof projectSchema>;
 export const createProjectSchema = z.object({ name: z.string().min(1).default("Untitled prototype") });
 export const selectTemplateSchema = z.object({ templateId: z.string().min(1) });
 export const selectSystemsSchema = z.object({ systemIds: z.array(z.string()) });
-export const gherkinUpdateSchema = z.object({ gherkin: z.string() });
 export const generateSchema = z.object({ gherkin: z.string().min(1), templateId: z.string().min(1) });
 export const annotationCreateSchema = z.object({
   pageId: z.string().min(1),

@@ -72,11 +72,12 @@ export function renderBriefing(project: Project, batchId: string, annotations: A
   ];
 
   for (const [index, annotation] of annotations.entries()) {
-    const page = pages.get(annotation.pageId);
+    const page = annotation.priorGeneration ? undefined : pages.get(annotation.pageId);
     lines.push(
       `${index + 1}. **${annotation.target.label}** - ${annotation.note}`,
       `   - Page: ${annotation.pageTitle}${page ? ` (${page.path})` : ""}`,
-      `   - Anchor: ${annotation.target.anchor ?? "none"}`,
+      ...(annotation.priorGeneration ? ["   - Anchor and selector belong to a prior generation, not the current use case or template."] : []),
+      `   - Anchor${annotation.priorGeneration ? " (prior generation)" : ""}: ${annotation.target.anchor ?? "none"}`,
       `   - Selector: \`${annotation.target.domPath}\``,
       ``,
     );
@@ -106,6 +107,10 @@ async function runAgent(command: string, input: string): Promise<string> {
         resolve(stdout.trim());
       },
     );
+    child.stdin?.on("error", (error: Error) => {
+      reject(new StudioError(`The review agent "${command}" could not receive the briefing: ${error.message}`, 502));
+      child.kill();
+    });
     child.stdin?.end(input);
   });
 }

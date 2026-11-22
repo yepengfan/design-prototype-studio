@@ -6,7 +6,6 @@ import {
   annotationCreateSchema,
   createProjectSchema,
   generateSchema,
-  gherkinUpdateSchema,
   selectSystemsSchema,
   selectTemplateSchema,
   sourceRequestSchema,
@@ -138,16 +137,6 @@ export async function createApp(options: AppOptions = {}) {
         return { ...current, selectedTemplateId: templateId };
       });
       response.json({ project });
-    }),
-  );
-
-  app.put(
-    "/api/projects/:id/gherkin",
-    route(async (request, response) => {
-      const { gherkin } = gherkinUpdateSchema.parse(request.body);
-      response.json({
-        project: await updateProject(param(request, "id"), (current) => ({ ...current, gherkin })),
-      });
     }),
   );
 

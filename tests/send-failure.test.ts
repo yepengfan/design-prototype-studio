@@ -64,6 +64,19 @@ async function read(projectId: string): Promise<Project> {
 }
 
 describe("a send that does not reach an agent", () => {
+  it("keeps notes queued and the server alive when the agent exits before reading", async () => {
+    config.agentCommand = `node ${fileURLToPath(new URL("./fixtures/early-exit-agent.mjs", import.meta.url))}`;
+    const project = await queueNote("Early exit");
+    await updateProject(project.id, (current) => ({
+      ...current, annotations: current.annotations.map((annotation) => ({ ...annotation, note: "x".repeat(8 * 1024 * 1024) })),
+    }));
+    expect((await send(project.id)).status).toBe(502);
+    const after = await read(project.id);
+    expect(after.batches).toHaveLength(0);
+    expect(after.annotations[0]!.batchId).toBeUndefined();
+    expect(after.annotations[0]!.note.length).toBe(8 * 1024 * 1024);
+  });
+
   it("keeps the notes queued when no agent is configured", async () => {
     config.agentCommand = undefined;
     const project = await queueNote("No agent");
