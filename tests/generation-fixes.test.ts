@@ -49,7 +49,8 @@ function render(gherkin: string, components = catalog) {
 
 describe("generation invariants", () => {
   it("generates Table, Select and Card children from their npm module exports", () => {
-    const { plan, document } = render(`${ordersGherkin}    When I select "Overdue" from "Status"\n    Then I see a "Row count" summary\n`);
+    const gherkin = ordersGherkin.replace('I choose "Show overdue"', 'I select "Overdue" from "Status"');
+    const { plan, document } = render(`${gherkin}    Then I see a "Row count" summary\n`);
     expect(plan.gaps).toEqual([]);
     expect(document.querySelectorAll("tbody tr")).toHaveLength(2);
     expect(document.querySelector("h3")?.textContent).toBe("Row count");
