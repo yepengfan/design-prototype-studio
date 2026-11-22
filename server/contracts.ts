@@ -256,6 +256,7 @@ export const selectSystemsSchema = z.object({ systemIds: z.array(z.string()) });
 export const generateSchema = z.object({ gherkin: z.string().min(1), templateId: z.string().min(1) });
 export const annotationCreateSchema = z.object({
   pageId: z.string().min(1),
+  generatedAt: z.iso.datetime(),
   target: annotationTargetSchema,
   note: z.string().min(1),
 });

@@ -202,6 +202,7 @@ export async function addAnnotation(
   pageId: string,
   target: AnnotationTarget,
   note: string,
+  generatedAt: string,
 ): Promise<{ project: Project; annotation: Annotation }> {
   let annotation!: Annotation;
   const saved = await updateProject(projectId, (project) => {
@@ -212,6 +213,7 @@ export async function addAnnotation(
       id: randomUUID(),
       pageId,
       pageTitle: page.title,
+      ...(generatedAt !== page.generatedAt ? { priorGeneration: true } : {}),
       target,
       note,
       createdAt: new Date().toISOString(),

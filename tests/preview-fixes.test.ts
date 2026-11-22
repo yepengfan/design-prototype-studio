@@ -203,7 +203,7 @@ describe("preview publication through the Studio API", () => {
     const { base, id, request } = await setup();
     const { project: initial } = await call(`${base}/generate`, "POST", request);
     await call(`${base}/annotations`, "POST", {
-      pageId: initial.pages[0]!.id, note: "Keep this context",
+      pageId: initial.pages[0]!.id, generatedAt: initial.pages[0]!.generatedAt, note: "Keep this context",
       target: { label: "Show overdue", domPath: "button", anchor: "control-show-overdue" },
     }, 201);
     const { project: before } = await call(base);

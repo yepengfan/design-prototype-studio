@@ -157,8 +157,8 @@ export async function createApp(options: AppOptions = {}) {
   app.post(
     "/api/projects/:id/annotations",
     route(async (request, response) => {
-      const { pageId, target, note } = annotationCreateSchema.parse(request.body);
-      const { project, annotation } = await addAnnotation(param(request, "id"), pageId, target, note);
+      const { pageId, target, note, generatedAt } = annotationCreateSchema.parse(request.body);
+      const { project, annotation } = await addAnnotation(param(request, "id"), pageId, target, note, generatedAt);
       response.status(201).json({ project, annotation });
     }),
   );

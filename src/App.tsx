@@ -246,7 +246,7 @@ export function App() {
               onQueue={() =>
                 void run(async () => {
                   if (!page || !target) return;
-                  setProject((await api.addAnnotation(project.id, page.id, target, note.trim())).project);
+                  setProject((await api.addAnnotation(project.id, page.id, target, note.trim(), buildKey)).project);
                   setTarget(undefined);
                   setNote("");
                 })

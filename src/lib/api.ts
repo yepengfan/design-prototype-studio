@@ -75,10 +75,10 @@ export const api = {
       body: JSON.stringify({ gherkin, templateId }),
     }),
 
-  addAnnotation: (id: string, pageId: string, target: AnnotationTarget, note: string) =>
+  addAnnotation: (id: string, pageId: string, target: AnnotationTarget, note: string, generatedAt: string) =>
     request<{ project: Project }>(`/api/projects/${id}/annotations`, {
       method: "POST",
-      body: JSON.stringify({ pageId, target, note }),
+      body: JSON.stringify({ pageId, target, note, generatedAt }),
     }),
 
   removeAnnotation: (id: string, annotationId: string) =>

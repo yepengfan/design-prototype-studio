@@ -164,6 +164,31 @@ describe("planPage", () => {
       expect(result.gaps).toContainEqual(expect.objectContaining({ requirement }));
   });
 
+  it.each([
+    'I enter "Paid" into "Status"',
+    'I select "Paid" from "status"',
+    'I choose "Show paid"',
+  ])("reports overlapping status controls as unsupported: %s", (second) => {
+    const first = 'I choose "Show overdue"';
+    const result = plan(`Feature: F
+  Scenario: Sequential status filters
+    Given the following mock orders exist:
+      | Order | Status  |
+      | A-101 | Overdue |
+      | A-102 | Paid    |
+    When ${first}
+    Then order "A-102" is hidden
+    When ${second}
+    Then order "A-101" is hidden
+`, [...catalog, component("input"), component("select")]);
+    expect(result.blocks.filter((block) => ["text-filter", "select-filter", "filter-toggle"].includes(block.type))).toEqual([]);
+    for (const requirement of [first, second])
+      expect(result.gaps).toContainEqual(expect.objectContaining({
+        requirement, reason: 'Repeated writes to "Status" are unsupported. Describe one filter value per field.',
+      }));
+    expect(result.blocks.some((block) => block.type === "data-table")).toBe(true);
+  });
+
   it("reads a select filter and offers the values the rows contain", () => {
     const result = plan(`Feature: F
   Scenario: S

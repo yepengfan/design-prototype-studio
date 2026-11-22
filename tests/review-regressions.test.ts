@@ -146,7 +146,7 @@ describe("review regressions through project interfaces", () => {
     const templateId = imported.systems[0]!.templates[0]!.id;
     const { project: generated } = await call(`${base}/generate`, "POST", { templateId, gherkin: ordersGherkin });
     await call(`${base}/annotations`, "POST", {
-      pageId: generated.pages[0]!.id, note: "Call this Overdue only",
+      pageId: generated.pages[0]!.id, generatedAt: generated.pages[0]!.generatedAt, note: "Call this Overdue only",
       target: { label: "Show overdue", domPath: "button", anchor: "control-show-overdue" },
     });
     const gherkin = ordersGherkin.replace('I choose "Show overdue"', 'I type "A-101" into "Order"');
@@ -163,13 +163,50 @@ describe("review regressions through project interfaces", () => {
     expect(briefing).not.toContain("   - Anchor: control-show-overdue");
     expect(briefing).not.toContain("Page: Orders (src/app/page.tsx)");
     await call(`${base}/annotations`, "POST", {
-      pageId: reloaded.pages[0]!.id, note: "Current search",
+      pageId: reloaded.pages[0]!.id, generatedAt: reloaded.pages[0]!.generatedAt, note: "Current search",
       target: { label: "Order", domPath: "input", anchor: "control-order" },
     });
     const { project: current } = await call(base);
     const currentBriefing = deliveryModule.renderBriefing(current, "current", [current.annotations.at(-1)!]);
     expect(currentBriefing).toContain("   - Anchor: control-order");
     expect(currentBriefing).not.toContain("prior generation");
+  });
+
+  it("marks notes from a stale tab as prior-generation while accepting current-tab notes", async () => {
+    const { project: created } = await call("/api/projects", "POST", { name: "Two tabs" });
+    const base = `/api/projects/${created.id}`;
+    const { project: imported } = await call(`${base}/systems`, "POST", { name: "Fixture", spec: fixtureRegistry });
+    const templateId = imported.systems[0]!.templates[0]!.id;
+    const { project: tabA } = await call(`${base}/generate`, "POST", { templateId, gherkin: ordersGherkin });
+    const oldPage = tabA.pages[0]!;
+    const gherkin = ordersGherkin.replace('I choose "Show overdue"', 'I type "A-101" into "Order"');
+    const { project: tabB } = await call(`${base}/generate`, "POST", { templateId, gherkin });
+    const currentPage = tabB.pages[0]!;
+    expect(currentPage.id).toBe(oldPage.id);
+    expect(currentPage.generatedAt).not.toBe(oldPage.generatedAt);
+    const staleNote = {
+      pageId: oldPage.id, generatedAt: oldPage.generatedAt, note: "Rename this action",
+      target: { label: "Show overdue", domPath: "button", anchor: "control-show-overdue" },
+    };
+    await call(`${base}/annotations`, "POST", staleNote);
+    await call(`${base}/annotations`, "POST", {
+      pageId: currentPage.id, generatedAt: currentPage.generatedAt, note: "Improve search",
+      target: { label: "Order", domPath: "input", anchor: "filter-text-a-101" },
+    });
+    const { project: reloaded } = await call(base);
+    expect(reloaded.annotations[0]!.priorGeneration).toBe(true);
+    expect(reloaded.annotations[1]!.priorGeneration).toBeUndefined();
+    const { project: sent } = await call(`${base}/annotations/send`, "POST");
+    const briefing = await fs.readFile(path.join(config.dataDir, "deliveries", `${sent.batches[0]!.id}.md`), "utf8");
+    expect(briefing).toContain("Anchor (prior generation): control-show-overdue");
+    expect(briefing).not.toContain("   - Anchor: control-show-overdue");
+    expect(briefing).toContain("   - Anchor: filter-text-a-101");
+    const missingGeneration = { pageId: staleNote.pageId, target: staleNote.target, note: staleNote.note };
+    const refused = await fetch(`${origin}${base}/annotations`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(missingGeneration),
+    });
+    expect(refused.status).toBe(400);
+    expect((await call(base)).project.annotations).toHaveLength(2);
   });
 
   it("serializes mutations and releases the queue after a failure", async () => {
@@ -227,7 +264,7 @@ describe("review regressions through project interfaces", () => {
     const { project: generated } = await call(base);
     const pageId = generated.pages[0]!.id;
     await call(`${base}/annotations`, "POST", {
-      pageId, note: "Call this Overdue only", target: { label: "Show overdue", domPath: "button", anchor: "control-show-overdue" },
+      pageId, generatedAt: generated.pages[0]!.generatedAt, note: "Call this Overdue only", target: { label: "Show overdue", domPath: "button", anchor: "control-show-overdue" },
     });
     let entered!: () => void;
     let release!: () => void;
