@@ -40,10 +40,11 @@ export async function buildPreview(projectId: string, build: PreviewBuild): Prom
   await writeFile(root, "src/preview/bridge.ts", await readRuntime("bridge.ts"));
   await writeFile(root, "src/preview/main.tsx", mainSource(build.entryModule));
   await writeFile(root, "src/styles.css", `${build.styles}\n@source "./";\n${annotationStyles}`);
+  const assertAllowedFile = await previewFileBoundary(root, build.files);
   const output = await fs.mkdtemp(path.join(root, "preview-build-"));
   try {
-    await bundle(root, output);
-    await compileStyles(root, output, build.files);
+    await bundle(root, output, assertAllowedFile);
+    await compileStyles(root, output, build.files, assertAllowedFile);
     let componentCss = "";
     try {
       componentCss = await fs.readFile(path.join(output, "preview.css"), "utf8");
@@ -63,7 +64,28 @@ export async function buildPreview(projectId: string, build: PreviewBuild): Prom
   }
 }
 
-async function bundle(root: string, output: string): Promise<void> {
+async function previewFileBoundary(root: string, files: ResolvedFile[]): Promise<(file: string) => Promise<void>> {
+  const canonicalRoot = await fs.realpath(root);
+  const generated = new Set([
+    ...files.map((file) => file.path),
+    "src/lib/utils.ts", "src/preview/bridge.ts", "src/preview/main.tsx", "src/styles.css",
+  ].map((file) => path.resolve(canonicalRoot, file)));
+  const dependencies: string[] = [];
+  for (const directory of [path.join(root, "node_modules"), path.join(config.repoRoot, "node_modules")]) {
+    try {
+      dependencies.push(await fs.realpath(directory));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return async (file) => {
+    const resolved = await fs.realpath(file);
+    if (!generated.has(resolved) && !dependencies.some((directory) => resolved.startsWith(directory + path.sep)))
+      throw new StudioError(`Preview imports must resolve to generated sources or dependency packages: ${file}`, 422);
+  };
+}
+
+async function bundle(root: string, output: string, assertAllowedFile: (file: string) => Promise<void>): Promise<void> {
   const src = path.join(root, "src");
   try {
     await esbuild.build({
@@ -80,6 +102,15 @@ async function bundle(root: string, output: string): Promise<void> {
       nodePaths: [path.join(root, "node_modules"), path.join(config.repoRoot, "node_modules")],
       define: { "process.env.NODE_ENV": '"development"' },
       logLevel: "silent",
+      plugins: [{
+        name: "preview-file-boundary",
+        setup(build) {
+          build.onLoad({ filter: /.*/, namespace: "file" }, async (args) => {
+            await assertAllowedFile(args.path);
+            return undefined;
+          });
+        },
+      }],
     });
   } catch (error) {
     throw new StudioError(buildFailure(error), 422);
@@ -99,7 +130,12 @@ function reactAliases(): Record<string, string> {
   return { react: path.join(modules, "react"), "react-dom": path.join(modules, "react-dom") };
 }
 
-async function compileStyles(root: string, output: string, files: ResolvedFile[]): Promise<void> {
+async function compileStyles(
+  root: string,
+  output: string,
+  files: ResolvedFile[],
+  assertAllowedFile: (file: string) => Promise<void>,
+): Promise<void> {
   try {
     const resolveCss = create.sync({
       extensions: [".css"], mainFields: ["style"], conditionNames: ["style"],
@@ -111,6 +147,7 @@ async function compileStyles(root: string, output: string, files: ResolvedFile[]
       loadStylesheet: async (id, base) => {
         const resolved = resolveCss(base, id);
         if (!resolved) throw new Error(`Could not resolve stylesheet ${id}`);
+        await assertAllowedFile(resolved);
         return { path: resolved, base: path.dirname(resolved), content: await fs.readFile(resolved, "utf8") };
       },
     });

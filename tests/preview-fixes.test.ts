@@ -73,6 +73,45 @@ async function preview(id: string) {
 }
 
 describe("preview publication through the Studio API", () => {
+  it.each(["json", "css", "symlink"])("rejects %s imports outside the generated file set", async (kind) => {
+    const id = `file-boundary-${kind}`;
+    const root = paths.project(id);
+    await fs.mkdir(path.join(root, "src/app"), { recursive: true });
+    const file = path.join(root, kind === "css" ? "unrelated.css" : "unrelated.json");
+    await fs.writeFile(file, kind === "css" ? ".unrelated { color: blue; }" : JSON.stringify({ label: "Unrelated fixture" }));
+    const imported = kind === "symlink" ? "./linked.json" : `../../unrelated.${kind}`;
+    if (kind === "symlink") await fs.symlink(file, path.join(root, "src/app/linked.json"));
+    await expect(buildPreview(id, {
+      files: [{ path: "src/app/page.tsx", content: kind === "css"
+        ? `import "${imported}"; export default function Page() { return <p>Fixture</p> }`
+        : `import fixture from "${imported}"; export default function Page() { return <p>{fixture.label}</p> }` }],
+      styles: '@import "tailwindcss";', entryModule: "@/app/page",
+    })).rejects.toThrow("Preview imports must resolve to generated sources or dependency packages");
+    expect(await fs.readFile(file, "utf8")).toBe(kind === "css" ? ".unrelated { color: blue; }" : JSON.stringify({ label: "Unrelated fixture" }));
+  });
+
+  it("rejects theme imports outside generated sources and dependency packages", async () => {
+    const id = "theme-file-boundary";
+    const root = paths.project(id);
+    await fs.mkdir(root, { recursive: true });
+    await fs.writeFile(path.join(root, "unrelated.css"), ".unrelated { color: blue; }");
+    await expect(buildPreview(id, {
+      files: [{ path: "src/app/page.tsx", content: 'export default function Page() { return <p>Fixture</p> }' }],
+      styles: '@import "../unrelated.css";', entryModule: "@/app/page",
+    })).rejects.toThrow("Preview imports must resolve to generated sources or dependency packages");
+  });
+
+  it("allows generated JSON modules and dependency imports", async () => {
+    const id = "allowed-file-boundary";
+    await buildPreview(id, {
+      files: [
+        { path: "src/app/page.tsx", content: 'import fixture from "./fixture.json"; import { clsx } from "clsx"; export default function Page() { return <p className={clsx("flex")}>{fixture.label}</p> }' },
+        { path: "src/app/fixture.json", content: JSON.stringify({ label: "Allowed fixture" }) },
+      ], styles: '@import "tailwindcss";', entryModule: "@/app/page",
+    });
+    expect((await preview(id)).javascript).toContain("Allowed fixture");
+  });
+
   it("preserves component styles beside the generated Tailwind utilities", async () => {
     const id = "component-css";
     await buildPreview(id, {

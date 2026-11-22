@@ -60,6 +60,14 @@ describe("renderBriefing", () => {
     expect(briefing).toContain("Template: shadcn-1:dashboard-01");
   });
 
+  it.each(["another-template", undefined])("uses the rendered template when pending selection is %s", (selectedTemplateId) => {
+    const briefing = renderBriefing({ ...project, selectedTemplateId }, "batch-selection", [annotation]);
+    expect(briefing).toContain("Template: shadcn-1:dashboard-01");
+    expect(briefing).not.toContain("Template: another-template");
+    expect(briefing).not.toContain("Template: none");
+    expect(briefing).toContain("Anchor: control-show-overdue");
+  });
+
   it("includes the use case the page was generated from", () => {
     expect(briefing).toContain("Feature: Review overdue orders");
   });

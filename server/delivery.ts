@@ -59,7 +59,7 @@ export function renderBriefing(project: Project, batchId: string, annotations: A
     `- Project: ${project.name}`,
     `- Batch: ${batchId}`,
     `- Design systems: ${project.systems.map((system) => `${system.name} (${system.origin})`).join(", ") || "none"}`,
-    `- Template: ${project.selectedTemplateId ?? "none"}`,
+    `- Template: ${[...new Set(project.pages.map((page) => page.templateId))].join(", ") || "none"}`,
     ``,
     `## Use case`,
     ``,
