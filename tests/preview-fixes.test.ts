@@ -10,6 +10,13 @@ import { buildPreview } from "../server/preview.js";
 import { resolveTheme } from "../server/sources/theme.js";
 import { ordersGherkin } from "./fixtures.js";
 
+/** Only the parts of a registry item these tests rewrite on disk. */
+type RegistryItem = {
+  cssVars?: { light?: Record<string, string>; dark?: Record<string, string> };
+  css?: Record<string, unknown>;
+  files: { content: string }[];
+};
+
 vi.mock("../server/dependencies.js", () => ({ ensurePackages: vi.fn() }));
 const { createApp } = await import("../server/app.js");
 const previousDataDir = config.dataDir;
@@ -41,7 +48,7 @@ async function call(route: string, method = "GET", body?: unknown, status = 200)
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   expect(response.status, await response.clone().text()).toBe(status);
-  return response.json();
+  return (await response.json()) as { project: Project };
 }
 
 async function setup() {
@@ -77,8 +84,8 @@ describe("preview publication through the Studio API", () => {
   it("carries the template and component published tokens into compiled CSS", async () => {
     const templateFile = path.join(registry, "console-01.json");
     const componentFile = path.join(registry, "button.json");
-    const template = JSON.parse(await fs.readFile(templateFile, "utf8"));
-    const component = JSON.parse(await fs.readFile(componentFile, "utf8"));
+    const template = JSON.parse(await fs.readFile(templateFile, "utf8")) as RegistryItem;
+    const component = JSON.parse(await fs.readFile(componentFile, "utf8")) as RegistryItem;
     template.cssVars = { light: { background: "#123456", foreground: "#fedcba" }, dark: { background: "#654321" } };
     component.cssVars = { light: { border: "#abcdef", ring: "#112233" } };
     await fs.writeFile(templateFile, JSON.stringify(template));
@@ -100,9 +107,9 @@ describe("preview publication through the Studio API", () => {
     const { project: before } = await call(base);
     const served = await preview(id);
     const buttonFile = path.join(registry, "button.json");
-    const button = JSON.parse(await fs.readFile(buttonFile, "utf8"));
+    const button = JSON.parse(await fs.readFile(buttonFile, "utf8")) as RegistryItem;
     const original = structuredClone(button);
-    button.files[0].content = "export function Button( { invalid";
+    button.files[0]!.content = "export function Button( { invalid";
     await fs.writeFile(buttonFile, JSON.stringify(button));
     const renamed = { ...request, gherkin: request.gherkin.replace("the Orders page", "the Renamed page") };
     await call(`${base}/generate`, "POST", renamed, 422);

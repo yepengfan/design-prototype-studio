@@ -6,9 +6,8 @@ describe("parseGherkin", () => {
   it("reads the feature, its scenario and its steps", () => {
     const feature = parseGherkin(ordersGherkin);
     expect(feature.name).toBe("Review overdue orders");
-    expect(feature.scenarios).toHaveLength(1);
-    expect(feature.scenarios[0]!.name).toBe("Filter the orders list");
-    expect(feature.scenarios[0]!.steps.map((step) => step.keyword)).toEqual([
+    expect(feature.scenario.name).toBe("Filter the orders list");
+    expect(feature.scenario.steps.map((step) => step.keyword)).toEqual([
       "Given",
       "When",
       "When",
@@ -18,7 +17,7 @@ describe("parseGherkin", () => {
   });
 
   it("reads a data table as columns and rows", () => {
-    const [given] = parseGherkin(ordersGherkin).scenarios[0]!.steps;
+    const [given] = parseGherkin(ordersGherkin).scenario.steps;
     expect(given!.table).toEqual({
       columns: ["Order", "Status"],
       rows: [
@@ -29,7 +28,7 @@ describe("parseGherkin", () => {
   });
 
   it("drops the trailing colon a table step introduces", () => {
-    const [given] = parseGherkin(ordersGherkin).scenarios[0]!.steps;
+    const [given] = parseGherkin(ordersGherkin).scenario.steps;
     expect(given!.text).toBe("the following mock orders exist");
   });
 
@@ -40,7 +39,7 @@ describe("parseGherkin", () => {
     And I choose "Show overdue"
     But I keep the filter
 `);
-    expect(feature.scenarios[0]!.steps.map((step) => step.keyword)).toEqual(["When", "When", "When"]);
+    expect(feature.scenario.steps.map((step) => step.keyword)).toEqual(["When", "When", "When"]);
   });
 
   it("ignores comments and separator rows", () => {
@@ -52,7 +51,7 @@ describe("parseGherkin", () => {
       | ----- |
       | A-101 |
 `);
-    expect(feature.scenarios[0]!.steps[0]!.table?.rows).toEqual([["A-101"]]);
+    expect(feature.scenario.steps[0]!.table?.rows).toEqual([["A-101"]]);
   });
 
   it("explains what a use case without a feature is missing", () => {
@@ -65,6 +64,32 @@ describe("parseGherkin", () => {
 
   it("rejects a data table that follows no step", () => {
     expect(() => parseGherkin("Feature: F\n  Scenario: S\n    | a |")).toThrow(/must follow a step/);
+  });
+
+  describe("a second scenario", () => {
+    const twoScenarios = `${ordersGherkin}
+  Scenario: Delete an order
+    When I click "Delete order"
+    Then order "A-101" is gone
+`;
+
+    it("is refused rather than generated from the first alone", () => {
+      expect(() => parseGherkin(twoScenarios)).toThrow(/only one scenario/);
+    });
+
+    it("is named in the refusal, so nothing is dropped without the designer seeing it", () => {
+      expect(() => parseGherkin(twoScenarios)).toThrow(/"Delete an order"/);
+    });
+
+    it("leaves no way for a caller to read the first scenario and discard the rest", () => {
+      let feature: ReturnType<typeof parseGherkin> | undefined;
+      try {
+        feature = parseGherkin(twoScenarios);
+      } catch {
+        feature = undefined;
+      }
+      expect(feature).toBeUndefined();
+    });
   });
 });
 

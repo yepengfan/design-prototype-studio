@@ -4,8 +4,8 @@ import { StudioError } from "./errors.js";
 const stepKeywords = ["Given", "When", "Then", "And", "But", "*"] as const;
 
 /**
- * Parses the Gherkin subset the Studio generates from: one feature, its
- * scenarios, their steps and data tables.
+ * Parses the Gherkin subset the Studio generates from: one feature, its single
+ * scenario, that scenario's steps and their data tables.
  *
  * `And`, `But` and `*` continue the previous keyword, which is how Gherkin
  * defines them, so a plan sees the real intent of every step.
@@ -72,7 +72,20 @@ export function parseGherkin(text: string): GherkinFeature {
   for (const entry of scenarios)
     if (entry.steps.length === 0) throw new StudioError(`Scenario "${entry.name}" has no steps.`);
 
-  return { name: feature.name, description: feature.description.join(" "), scenarios };
+  // A page is generated from one scenario. Naming the ones that would be left
+  // out is the point: accepting them and generating from the first alone would
+  // silently discard everything they ask for.
+  if (scenarios.length > 1)
+    throw new StudioError(
+      `A use case generates one page, so it may describe only one scenario. ` +
+        `Keep "${scenarios[0]!.name}" and move ${scenarios
+          .slice(1)
+          .map((entry) => `"${entry.name}"`)
+          .join(", ")} into their own use case.`,
+      422,
+    );
+
+  return { name: feature.name, description: feature.description.join(" "), scenario: scenarios[0]! };
 }
 
 function splitRow(line: string): string[] {

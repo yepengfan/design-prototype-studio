@@ -112,7 +112,7 @@ export async function generate(
   let page!: GeneratedPage;
   const saved = await updateProject(projectId, async (project) => {
     const feature = parseGherkin(gherkin);
-    const scenario = feature.scenarios[0]!;
+    const scenario = feature.scenario;
 
     const template = selectedTemplates(project).find((candidate) => candidate.id === templateId);
     if (!template)

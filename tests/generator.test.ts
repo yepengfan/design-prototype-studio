@@ -28,7 +28,7 @@ const catalog = [
 ];
 
 function generate(components = catalog, gherkin = ordersGherkin) {
-  const plan = planPage(parseGherkin(gherkin).scenarios[0]!, components);
+  const plan = planPage(parseGherkin(gherkin).scenario, components);
   return generatePage({
     plan,
     components: new Map(components.map((entry) => [entry.id, entry])),

@@ -23,16 +23,28 @@ function component(name: string, exports: string[] = []): CatalogComponent {
 const catalog = [component("table"), component("badge"), component("button"), component("card")];
 
 function plan(gherkin: string, components = catalog) {
-  return planPage(parseGherkin(gherkin).scenarios[0]!, components);
+  return planPage(parseGherkin(gherkin).scenario, components);
 }
 
 describe("planPage", () => {
-  it.each(['I click "Delete order"', 'I click "Delete overdue order"', "I click Delete order"])("reports unsupported action %s against its step", (step) => {
+  it.each(['I click "Delete order"', 'I click "Delete overdue order"'])("reports unsupported action %s against its step", (step) => {
     const result = plan(`${ordersGherkin}    When ${step}\n`);
     expect(result.gaps).toHaveLength(1);
     expect(result.gaps[0]!.capability).toBe("button");
     expect(result.gaps[0]!.requirement).toBe(step);
     expect(result.gaps[0]!.reason).toContain("unsupported interaction");
+    expect(result.blocks.filter((block) => block.type === "filter-toggle")).toHaveLength(1);
+  });
+
+  it("reports an action whose label is not quoted as an unsupported step, still naming the requirement", () => {
+    // The supported grammar quotes the control's label. An unquoted one is not
+    // read as a button at all, so it is reported as an unsupported step rather
+    // than as a missing button.
+    const step = "I click Delete order";
+    const result = plan(`${ordersGherkin}    When ${step}\n`);
+    expect(result.gaps).toHaveLength(1);
+    expect(result.gaps[0]!.capability).toBe("requirement");
+    expect(result.gaps[0]!.requirement).toBe(step);
     expect(result.blocks.filter((block) => block.type === "filter-toggle")).toHaveLength(1);
   });
 

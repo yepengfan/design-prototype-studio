@@ -116,7 +116,9 @@ export const gherkinScenarioSchema = z.object({
 export const gherkinFeatureSchema = z.object({
   name: z.string(),
   description: z.string(),
-  scenarios: z.array(gherkinScenarioSchema),
+  // One scenario, not a list: a page is generated from a single scenario, and a
+  // list would let a second one be read and then quietly left out.
+  scenario: gherkinScenarioSchema,
 });
 
 export type GherkinStep = z.infer<typeof gherkinStepSchema>;

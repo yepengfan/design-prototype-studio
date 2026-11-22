@@ -67,6 +67,34 @@ describe("review regressions through project interfaces", () => {
     expect((await loadProject(project.id)).name).toBe("Still writable");
   });
 
+  it("refuses a second scenario at generation instead of building from the first alone", async () => {
+    const { project: created } = await call("/api/projects", "POST", { name: "Two scenarios" });
+    const base = `/api/projects/${created.id}`;
+    const { project: imported } = await call(`${base}/systems`, "POST", { name: "Fixture", spec: fixtureRegistry });
+    const templateId = imported.systems[0]!.templates[0]!.id;
+
+    const response = await fetch(`${origin}${base}/generate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        templateId,
+        gherkin: `${ordersGherkin}
+  Scenario: Delete an order
+    When I click "Delete order"
+    Then order "A-101" is gone
+`,
+      }),
+    });
+
+    expect(response.status).toBe(422);
+    const refusal = (await response.json()) as { error?: string };
+    expect(refusal.error).toContain("Delete an order");
+
+    // No page was built, so the second scenario cannot have been dropped quietly.
+    const { project: after } = await call(base);
+    expect(after.pages).toHaveLength(0);
+  });
+
   it("preserves selections during builds and notes across repeated generation and pickup", async () => {
     const { project: created } = await call("/api/projects", "POST", { name: "Orders" });
     const base = `/api/projects/${created.id}`;

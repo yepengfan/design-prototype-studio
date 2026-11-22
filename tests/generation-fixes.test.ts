@@ -17,7 +17,7 @@ const catalog = readDeclarations(path.resolve("tests/fixtures/npm/composable.d.t
 const require = createRequire(import.meta.url);
 
 function render(gherkin: string, components = catalog) {
-  const plan = planPage(parseGherkin(gherkin).scenarios[0]!, components);
+  const plan = planPage(parseGherkin(gherkin).scenario, components);
   const generated = generatePage({
     plan, components: new Map(components.map((component) => [component.id, component])),
     shellImportPath: "fixture-shell", shellExport: "TemplateShell",
@@ -30,9 +30,18 @@ function render(gherkin: string, components = catalog) {
   const runtime = Object.fromEntries(catalog.map((component) => [component.name,
     ({ children }: { children?: ReactNode }) => createElement(tags[component.name] ?? "div", {}, children),
   ]));
-  new Function("require", "exports", "module", transformSync(generated.source, {
+  type ModuleFactory = (
+    require_: (name: string) => unknown,
+    exports: typeof module.exports,
+    module_: typeof module,
+  ) => void;
+  // The point of this test is that the generated page really runs, so its
+  // compiled source is executed rather than inspected.
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval
+  const factory = new Function("require", "exports", "module", transformSync(generated.source, {
     loader: "tsx", format: "cjs", jsx: "automatic",
-  }).code)((name: string) => name === "fixture-ui" ? runtime : name === "fixture-shell"
+  }).code) as ModuleFactory;
+  factory((name: string) => name === "fixture-ui" ? runtime : name === "fixture-shell"
     ? { TemplateShell: ({ children }: { children?: ReactNode }) => createElement("main", {}, children) }
     : require(name), module.exports, module);
   return { plan, document: new JSDOM(renderToStaticMarkup(createElement(module.exports.default!))).window.document };
