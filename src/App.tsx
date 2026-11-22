@@ -192,7 +192,7 @@ export function App() {
             <GherkinEditor
               gherkin={gherkin}
               busy={busy}
-              canGenerate={Boolean(project.selectedTemplateId) && templates.length > 0}
+              canGenerate={templates.some((template) => template.id === project.selectedTemplateId)}
               onChange={setGherkin}
               onGenerate={() =>
                 void run(async () => {

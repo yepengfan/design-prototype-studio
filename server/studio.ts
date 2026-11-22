@@ -1,3 +1,4 @@
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { paths } from "./config.js";
 import type {
@@ -143,7 +144,7 @@ export async function generate(
       shellExport: "TemplateShell",
     });
 
-    const files: ResolvedFile[] = [resolved.shell, ...resolved.files];
+    const files = [resolved.shell, ...resolved.files].map((file) => ({ ...file, system: templateSystem.name }));
     const themeItems = [...resolved.items];
     const packages = new Set([...resolved.packages, "react", "react-dom", "clsx", "tailwind-merge"]);
     const needed = plan.blocks.flatMap((block) => block.componentIds);
@@ -154,7 +155,7 @@ export async function generate(
         .map((component) => component.name);
       if (names.length === 0) continue;
       const closure = await resolveClosure(system.spec, names);
-      files.push(...closure.files);
+      files.push(...closure.files.map((file) => ({ ...file, system: system.name })));
       themeItems.push(...closure.items);
       for (const packageName of closure.packages) packages.add(packageName);
     }
@@ -162,11 +163,12 @@ export async function generate(
     const theme = await resolveTheme(templateSystem.spec, themeItems);
     for (const packageName of theme.packages) packages.add(packageName);
     const pagePath = "src/app/page.tsx";
-    files.push({ path: pagePath, content: generated.source });
+    files.push({ path: pagePath, content: generated.source, system: "Generated page" });
+    const mergedFiles = dedupeFiles(files);
 
     await ensurePackages(paths.project(projectId), [...packages]);
     await buildPreview(projectId, {
-      files: dedupeFiles(files),
+      files: mergedFiles,
       styles: theme.css,
       entryModule: "@/app/page",
     });
@@ -252,9 +254,16 @@ export async function sendQueuedAnnotations(projectId: string): Promise<Project>
   });
 }
 
-function dedupeFiles(files: ResolvedFile[]): ResolvedFile[] {
-  const unique = new Map(files.map((file) => [file.path, file]));
-  return [...unique.values()];
+function dedupeFiles(files: (ResolvedFile & { system: string })[]): ResolvedFile[] {
+  const unique = new Map<string, ResolvedFile & { system: string }>();
+  for (const file of files) {
+    const normalizedPath = path.posix.normalize(file.path);
+    const existing = unique.get(normalizedPath);
+    if (existing && existing.content !== file.content)
+      throw new StudioError(`Conflicting registry files at "${normalizedPath}" from "${existing.system}" and "${file.system}".`, 422);
+    if (!existing) unique.set(normalizedPath, { ...file, path: normalizedPath });
+  }
+  return [...unique.values()].map(({ path, content }) => ({ path, content }));
 }
 
 function slug(value: string): string {

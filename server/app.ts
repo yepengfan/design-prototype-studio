@@ -105,7 +105,12 @@ export async function createApp(options: AppOptions = {}) {
         const known = new Set(current.systems.map((system) => system.id));
         const unknown = systemIds.filter((id) => !known.has(id));
         if (unknown.length) throw new StudioError(`This project has not imported ${unknown.join(", ")}.`);
-        return { ...current, selectedSystemIds: systemIds };
+        const selected = { ...current, selectedSystemIds: systemIds };
+        return {
+          ...selected,
+          selectedTemplateId: selectedTemplates(selected).some((template) => template.id === current.selectedTemplateId)
+            ? current.selectedTemplateId : undefined,
+        };
       });
       response.json({ project });
     }),
