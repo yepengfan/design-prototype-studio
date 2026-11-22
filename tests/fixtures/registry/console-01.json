@@ -1,0 +1,39 @@
+{
+  "name": "console-01",
+  "type": "registry:block",
+  "description": "A console with a sidebar and a header.",
+  "dependencies": [
+    "chart-lib"
+  ],
+  "registryDependencies": [
+    "shell"
+  ],
+  "files": [
+    {
+      "path": "registry/fixture/blocks/console/page.tsx",
+      "content": "import { AppSidebar } from \"@/registry/fixture/blocks/console/components/app-sidebar\"\nimport { SiteHeader } from \"@/registry/fixture/blocks/console/components/site-header\"\nimport { SampleChart } from \"@/registry/fixture/blocks/console/components/sample-chart\"\nimport { SampleTable } from \"@/registry/fixture/blocks/console/components/sample-table\"\nimport { Shell } from \"@/registry/fixture/ui/shell\"\n\nexport default function Page() {\n  return (\n    <Shell>\n      <AppSidebar />\n      <main>\n        <SiteHeader />\n        <div className=\"content\">\n          <SampleChart />\n          <SampleTable />\n        </div>\n      </main>\n    </Shell>\n  )\n}\n",
+      "type": "registry:page",
+      "target": "app/console/page.tsx"
+    },
+    {
+      "path": "registry/fixture/blocks/console/components/app-sidebar.tsx",
+      "content": "export function AppSidebar() { return <aside>nav</aside> }\n",
+      "type": "registry:component"
+    },
+    {
+      "path": "registry/fixture/blocks/console/components/site-header.tsx",
+      "content": "export function SiteHeader() { return <header>header</header> }\n",
+      "type": "registry:component"
+    },
+    {
+      "path": "registry/fixture/blocks/console/components/sample-chart.tsx",
+      "content": "import { Chart } from \"chart-lib\"\nexport function SampleChart() { return <Chart /> }\n",
+      "type": "registry:component"
+    },
+    {
+      "path": "registry/fixture/blocks/console/components/sample-table.tsx",
+      "content": "export function SampleTable() { return <table /> }\n",
+      "type": "registry:component"
+    }
+  ]
+}

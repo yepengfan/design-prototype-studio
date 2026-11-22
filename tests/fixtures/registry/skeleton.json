@@ -1,0 +1,12 @@
+{
+  "name": "skeleton",
+  "type": "registry:ui",
+  "files": [
+    {
+      "path": "registry/fixture/ui/skeleton.tsx",
+      "content": "export function Skeleton(props: React.ComponentProps<\"div\">) { return <div {...props} /> }\n",
+      "type": "registry:ui"
+    }
+  ],
+  "description": "A loading placeholder."
+}

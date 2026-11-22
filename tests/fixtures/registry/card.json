@@ -1,0 +1,12 @@
+{
+  "name": "card",
+  "type": "registry:ui",
+  "files": [
+    {
+      "path": "registry/fixture/ui/card.tsx",
+      "content": "export function Card(props: React.ComponentProps<\"div\">) { return <div {...props} /> }\nexport function CardHeader(props: React.ComponentProps<\"div\">) { return <div {...props} /> }\nexport function CardTitle(props: React.ComponentProps<\"h3\">) { return <h3 {...props} /> }\nexport function CardContent(props: React.ComponentProps<\"div\">) { return <div {...props} /> }\n",
+      "type": "registry:ui"
+    }
+  ],
+  "description": "A panel."
+}

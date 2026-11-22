@@ -1,0 +1,11 @@
+{
+  "name": "shell",
+  "type": "registry:ui",
+  "files": [
+    {
+      "path": "registry/fixture/ui/shell.tsx",
+      "content": "export function Shell(props: React.ComponentProps<\"div\">) { return <div {...props} /> }\n",
+      "type": "registry:ui"
+    }
+  ]
+}
