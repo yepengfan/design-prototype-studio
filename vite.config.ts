@@ -20,7 +20,8 @@ export default defineConfig({
   server: {
     port: Number(process.env.STUDIO_CLIENT_PORT ?? 5173),
     proxy: {
-      "/api": `http://127.0.0.1:${apiPort}`,
+      // Keep the browser-facing Host aligned with Origin for the API guard.
+      "/api": { target: `http://127.0.0.1:${apiPort}`, changeOrigin: false },
       "/preview": `http://127.0.0.1:${apiPort}`,
     },
   },
