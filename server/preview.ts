@@ -32,6 +32,7 @@ body.studio-annotating [data-studio-anchor]:hover {
 export async function buildPreview(projectId: string, build: PreviewBuild): Promise<void> {
   const root = paths.project(projectId);
   const source = paths.projectSource(projectId);
+  for (const file of build.files) await validateDestination(root, file.path);
   await fs.rm(path.join(source, "registry"), { recursive: true, force: true });
   await fs.mkdir(source, { recursive: true });
 
@@ -172,10 +173,27 @@ function buildFailure(error: unknown): string {
   return `The preview could not be built${where}: ${first.text}`;
 }
 
+async function validateDestination(root: string, relative: string): Promise<void> {
+  const target = path.resolve(root, relative);
+  const segments = relative.split(/[\\/]/);
+  const reject = () => new StudioError(`Registry destination must stay within generated sources: ${relative}`, 422);
+  if (!target.startsWith(path.resolve(root, "src") + path.sep)
+    || path.isAbsolute(relative) || relative.includes("\\")
+    || segments.some((segment) => segment === ".." || segment === "node_modules")) throw reject();
+  let current = root;
+  for (const segment of path.relative(root, target).split(path.sep)) {
+    current = path.join(current, segment);
+    try {
+      if ((await fs.lstat(current)).isSymbolicLink()) throw reject();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") break;
+      throw error;
+    }
+  }
+}
+
 async function writeFile(root: string, relative: string, content: string): Promise<void> {
   const target = path.resolve(root, relative);
-  if (!target.startsWith(root + path.sep))
-    throw new StudioError(`A design system tried to write outside the project: ${relative}`);
   await fs.mkdir(path.dirname(target), { recursive: true });
   await fs.writeFile(target, content);
 }

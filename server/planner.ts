@@ -229,6 +229,13 @@ function readRequirements(scenario: GherkinScenario): Requirement[] {
     requirements.push(unhandled(step));
   }
 
+  const fieldWrites = requirements.filter(({ block }) =>
+    block.column && (block.type === "text-filter" || block.type === "select-filter"));
+  for (const requirement of fieldWrites) {
+    if (fieldWrites.filter(({ block }) => block.column === requirement.block.column).length > 1)
+      requirement.unsupported = `Repeated writes to "${requirement.block.column}" are unsupported. Describe one filter value per field.`;
+  }
+
   for (const step of outcomes) {
     const before = requirements.length;
     if (/\b(summary|total|totals|metric|count)\b/i.test(step.text))

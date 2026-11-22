@@ -73,6 +73,35 @@ async function preview(id: string) {
 }
 
 describe("preview publication through the Studio API", () => {
+  it.each([
+    "src/../project.json", "node_modules/fixture/index.js", "dist/fixture.js",
+    "src/../node_modules/fixture/index.js", "src/node_modules/fixture/index.js",
+    "src/../dist/fixture.js", "src/app/../../project.json",
+  ])("rejects registry destination %s before writing any files", async (destination) => {
+    const id = "rejected-registry-destination";
+    await expect(buildPreview(id, {
+      files: [
+        { path: "src/app/page.tsx", content: 'export default function Page() { return <p>Fixture</p> }' },
+        { path: destination, content: "Harmless rejected fixture" },
+      ],
+      styles: '@import "tailwindcss";', entryModule: "@/app/page",
+    })).rejects.toThrow("Registry destination must stay within generated sources");
+    await expect(fs.stat(paths.project(id))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects registry destinations through a symlink before writing", async () => {
+    const id = "symlink-registry-destination";
+    const root = paths.project(id);
+    await fs.mkdir(path.join(root, "src"), { recursive: true });
+    await fs.mkdir(path.join(root, "fixture"));
+    await fs.symlink(path.join(root, "fixture"), path.join(root, "src/linked"));
+    await expect(buildPreview(id, {
+      files: [{ path: "src/linked/fixture.txt", content: "Harmless rejected fixture" }],
+      styles: "", entryModule: "@/app/page",
+    })).rejects.toThrow("Registry destination must stay within generated sources");
+    expect(await fs.readdir(path.join(root, "fixture"))).toEqual([]);
+  });
+
   it.each(["json", "css", "symlink"])("rejects %s imports outside the generated file set", async (kind) => {
     const id = `file-boundary-${kind}`;
     const root = paths.project(id);

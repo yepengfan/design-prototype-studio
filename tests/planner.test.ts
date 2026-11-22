@@ -138,6 +138,32 @@ describe("planPage", () => {
     expect(filter).toMatchObject({ column: "Order", value: "A-101" });
   });
 
+  it.each([
+    ['I enter "A-101" into "Order"', 'I enter "A-102" into "Order"'],
+    ['I search for "A-101"', 'I type "A-102" into "order"'],
+    ['I select "A-101" from "Order"', 'I select "A-102" from "order"'],
+    ['I enter "A-101" into "Order"', 'I select "A-102" from "Order"'],
+  ])("reports repeated field writes as unsupported: %s then %s", (first, second) => {
+    const result = plan(`Feature: F
+  Scenario: Sequential order searches
+    Given the following mock orders exist:
+      | Order | Status  |
+      | A-101 | Overdue |
+      | A-102 | Paid    |
+    When ${first}
+    Then order "A-102" is hidden
+    When ${second}
+    Then order "A-101" is hidden
+`, [...catalog, component("input"), component("select")]);
+    expect(result.blocks.filter((block) => ["text-filter", "select-filter"].includes(block.type))).toEqual([]);
+    for (const requirement of [first, second])
+      expect(result.gaps).toContainEqual(expect.objectContaining({
+        requirement, reason: 'Repeated writes to "Order" are unsupported. Describe one filter value per field.',
+      }));
+    for (const requirement of ['order "A-101" is hidden', 'order "A-102" is hidden'])
+      expect(result.gaps).toContainEqual(expect.objectContaining({ requirement }));
+  });
+
   it("reads a select filter and offers the values the rows contain", () => {
     const result = plan(`Feature: F
   Scenario: S
