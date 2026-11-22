@@ -1,0 +1,12 @@
+{
+  "name": "badge",
+  "type": "registry:ui",
+  "files": [
+    {
+      "path": "registry/fixture/ui/badge.tsx",
+      "content": "import { cn } from \"cn\"\n\nexport function Badge({ className, ...props }: React.ComponentProps<\"span\">) {\n  return <span className={cn(\"badge\", className)} {...props} />\n}\n",
+      "type": "registry:ui"
+    }
+  ],
+  "description": "A status label."
+}

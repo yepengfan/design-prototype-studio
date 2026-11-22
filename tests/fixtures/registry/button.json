@@ -1,0 +1,15 @@
+{
+  "name": "button",
+  "type": "registry:ui",
+  "files": [
+    {
+      "path": "registry/fixture/ui/button.tsx",
+      "content": "import { cn } from \"cn\"\n\nexport function Button({ className, ...props }: React.ComponentProps<\"button\">) {\n  return <button className={cn(\"btn\", className)} {...props} />\n}\n",
+      "type": "registry:ui"
+    }
+  ],
+  "description": "A clickable control.",
+  "dependencies": [
+    "cn"
+  ]
+}

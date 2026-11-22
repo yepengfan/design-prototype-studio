@@ -1,0 +1,67 @@
+[
+  {
+    "name": "button",
+    "type": "registry:ui",
+    "description": "A clickable control.",
+    "files": [
+      {
+        "path": "registry/fixture/ui/button.tsx",
+        "type": "registry:ui"
+      }
+    ]
+  },
+  {
+    "name": "badge",
+    "type": "registry:ui",
+    "description": "A status label.",
+    "files": [
+      {
+        "path": "registry/fixture/ui/badge.tsx",
+        "type": "registry:ui"
+      }
+    ]
+  },
+  {
+    "name": "table",
+    "type": "registry:ui",
+    "description": "Rows and columns.",
+    "files": [
+      {
+        "path": "registry/fixture/ui/table.tsx",
+        "type": "registry:ui"
+      }
+    ]
+  },
+  {
+    "name": "skeleton",
+    "type": "registry:ui",
+    "description": "A loading placeholder.",
+    "files": [
+      {
+        "path": "registry/fixture/ui/skeleton.tsx",
+        "type": "registry:ui"
+      }
+    ]
+  },
+  {
+    "name": "card",
+    "type": "registry:ui",
+    "description": "A panel.",
+    "files": [
+      {
+        "path": "registry/fixture/ui/card.tsx",
+        "type": "registry:ui"
+      }
+    ]
+  },
+  {
+    "name": "shell",
+    "type": "registry:ui",
+    "files": [
+      {
+        "path": "registry/fixture/ui/shell.tsx",
+        "type": "registry:ui"
+      }
+    ]
+  }
+]
